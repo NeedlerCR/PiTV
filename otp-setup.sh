@@ -14,23 +14,21 @@ QR_MODE=false
 declare -A SECRETS=(
     ["SPACE INVADERS"]="JBSWY3DPEHPK3PXP"
     ["PAC-MAN"]="MFRA2YTMMFRA2YTM"
-    ["MOON BUGGY"]="GEZDGNBVGY3TQOJQ"
     ["SPACE SHOOTER"]="OB2XI2DFON2GK3TF"
     ["BOMBERMAN"]="KVKFKRCPNZQUYFY4"
     ["BREAKOUT"]="N5XCAZDGNZTGS3TN"
-    ["ASTEROID BELT"]="MJQXEZJAMJQXEZJA"
-    ["BATTLESHIP"]="ORSXG5BRGI3TQLBA"
+    ["VS TETRIS"]="NBQXG5DFMFZGKZLB"
+    ["MONOPOLY"]="NRXWO2LOMNXW2ZLU"
 )
 
 declare -A KEYS=(
     ["SPACE INVADERS"]="INVADERS"
     ["PAC-MAN"]="PACMAN"
-    ["MOON BUGGY"]="BUGGY"
     ["SPACE SHOOTER"]="SHOOTER"
     ["BOMBERMAN"]="BOMBERMAN"
     ["BREAKOUT"]="BREAKOUT"
-    ["ASTEROID BELT"]="ASTEROIDS"
-    ["BATTLESHIP"]="BATTLESHIP"
+    ["VS TETRIS"]="TETRISDUEL"
+    ["MONOPOLY"]="MONOPOLY"
 )
 
 echo ""
@@ -38,12 +36,12 @@ echo "=================================================================="
 echo "  PiTV Game OTP Secrets"
 echo "  Add each secret to your authenticator app."
 echo "  Emergency bypass (always works): 159753"
-echo "  Free games (no code needed): Snake, Tetris"
+echo "  Free games (no code needed): Snake, Tetris, Tic-Tac-Toe"
 echo "=================================================================="
 echo ""
 
-for game in "SPACE INVADERS" "PAC-MAN" "MOON BUGGY" "SPACE SHOOTER" \
-            "BOMBERMAN" "BREAKOUT" "ASTEROID BELT" "BATTLESHIP"; do
+for game in "SPACE INVADERS" "PAC-MAN" "SPACE SHOOTER" \
+            "BOMBERMAN" "BREAKOUT" "VS TETRIS" "MONOPOLY"; do
     secret="${SECRETS[$game]}"
     key="${KEYS[$game]}"
     label="PiTV:${key}"

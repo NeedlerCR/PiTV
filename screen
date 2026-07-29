@@ -20,7 +20,7 @@ Screensavers (optional duration in seconds):
 
 Other modes:
   screen mirror
-  screen game <invaders|tetris|buggy|snake|pacman|shooter|bomberman|breakout|asteroids|battleship>
+  screen game <invaders|tetris|snake|pacman|shooter|bomberman|breakout|vstetris|monopoly|tictactoe>
 
 Controller:
   screen controller        scan for Bluetooth controller (60 seconds)
@@ -85,17 +85,17 @@ case "$CMD" in
         KEY="${2:-}"
         [[ -z "$KEY" ]] && { echo "Usage: screen game <name>" >&2; exit 1; }
         case "${KEY,,}" in
-            inv|invaders|space) KEY="INVADERS"   ;;
-            tet|tetris)         KEY="TETRIS"      ;;
-            buggy|moon)         KEY="BUGGY"       ;;
-            snake|sn)           KEY="SNAKE"       ;;
-            pac|pacman)         KEY="PACMAN"      ;;
-            shoot|shooter|bsu)  KEY="SHOOTER"     ;;
-            bomb|bomberman)     KEY="BOMBERMAN"   ;;
-            break|breakout)     KEY="BREAKOUT"    ;;
-            aster|asteroids)    KEY="ASTEROIDS"   ;;
-            battle|battleship)  KEY="BATTLESHIP"  ;;
-            *)                  KEY="${KEY^^}"    ;;
+            inv|invaders|space)   KEY="INVADERS"   ;;
+            tet|tetris)           KEY="TETRIS"      ;;
+            snake|sn)             KEY="SNAKE"       ;;
+            pac|pacman)           KEY="PACMAN"      ;;
+            shoot|shooter|bsu)    KEY="SHOOTER"     ;;
+            bomb|bomberman)       KEY="BOMBERMAN"   ;;
+            break|breakout)       KEY="BREAKOUT"    ;;
+            vs|vstetris|duel)     KEY="TETRISDUEL"  ;;
+            mono|monopoly|monop)  KEY="MONOPOLY"    ;;
+            ttt|tictactoe|toe)    KEY="TICTACTOE"   ;;
+            *)                    KEY="${KEY^^}"    ;;
         esac
         _send_raw "RUN GAME INDEFINITE ${KEY}"
         ;;

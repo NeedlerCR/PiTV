@@ -62,7 +62,7 @@ def log_clear() -> None:
 # ─────────────────────────────────────────────────────────────────────
 
 EMERGENCY_CODE  = "159753"
-FREE_GAMES      = {"SNAKE", "TETRIS"}
+FREE_GAMES      = {"SNAKE", "TETRIS", "TICTACTOE"}
 GAME_SECRET     = "JBSWY3DPEHPK3PXP"   # one entry in authenticator covers all locked games
 OTP_MAX_FAILS   = 3
 
@@ -155,12 +155,12 @@ GAME_KEYS = {
     "TETRIS":     ["bastet"],
     "INVADERS":   ["ninvaders"],
     "PACMAN":     ["pacman4console"],
-    "BUGGY":      ["moon-buggy"],
     "BOMBERMAN":  ["bombardier"],
     "BREAKOUT":   ["lbreakout2"],
     "SHOOTER":    ["chromium-bsu"],
-    "ASTEROIDS":  ["kobodl"],           # kobodeluxe package installs binary as 'kobodl'
-    "BATTLESHIP": ["bs"],
+    "TETRISDUEL": ["vitetris"],         # 2-player versus Tetris (vitetris pkg)
+    "MONOPOLY":   ["monop"],            # 2-4 player Monopoly (bsdgames pkg)
+    "TICTACTOE":  ["nettoe"],           # 1-2 player Tic-Tac-Toe (nettoe pkg)
 }
 
 # (label, cmd_list, game_key, is_2player)
@@ -169,12 +169,12 @@ GAME_OPTIONS = [
     ("TETRIS",         ["bastet"],          "TETRIS",     False),
     ("SPACE INVADERS", ["ninvaders"],       "INVADERS",   False),
     ("PAC-MAN",        ["pacman4console"],  "PACMAN",     False),
-    ("MOON BUGGY",     ["moon-buggy"],      "BUGGY",      False),
     ("BOMBERMAN",      ["bombardier"],      "BOMBERMAN",  False),
     ("BREAKOUT",       ["lbreakout2"],      "BREAKOUT",   False),
     ("SPACE SHOOTER",  ["chromium-bsu"],    "SHOOTER",    False),
-    ("ASTEROID BELT",  ["kobodl"],          "ASTEROIDS",  False),
-    ("BATTLESHIP [2P]",["bs"],             "BATTLESHIP", True),
+    ("VS TETRIS",      ["vitetris"],        "TETRISDUEL", True),
+    ("MONOPOLY",       ["monop"],           "MONOPOLY",   True),
+    ("TIC-TAC-TOE",    ["nettoe"],          "TICTACTOE",  True),
 ]
 
 # Debian's bsdgames/bastet/etc packages install into /usr/games, but the
@@ -589,12 +589,12 @@ def run_game(stdscr, cmd_list: list):
             "bastet":         "bastet",
             "ninvaders":      "ninvaders",
             "pacman4console": "pacman4console",
-            "moon-buggy":     "moon-buggy",
             "bombardier":     "bombardier",
             "lbreakout2":     "lbreakout2",
             "chromium-bsu":   "chromium-bsu",
-            "kobodl":         "kobodeluxe",
-            "bs":             "bsdgames",
+            "vitetris":       "vitetris",
+            "monop":          "bsdgames",
+            "nettoe":         "nettoe",
         }.get(binary, binary)
         msg = [
             "GAME NOT INSTALLED",
@@ -618,7 +618,7 @@ def run_game(stdscr, cmd_list: list):
     _reset_terminal()
     os.system("clear")
 
-    SDL_GAMES = {"chromium-bsu", "lbreakout2", "kobodl"}
+    SDL_GAMES = {"chromium-bsu", "lbreakout2"}
     is_sdl    = binary in SDL_GAMES
 
     # Controller-to-keys mapper for ncurses games
