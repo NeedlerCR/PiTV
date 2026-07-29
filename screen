@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# /usr/local/bin/screen — PiTV CLI wrapper
+
+set -euo pipefail
+
+FIFO="/tmp/tv_menu.fifo"
+REMOTE_SCRIPT="/opt/pitv/remote.py"
+
+usage() {
+    cat >&2 << 'USAGE'
+Usage: screen <command> [arg]
+
+Navigation:
+  screen up | down | left | right | enter | back | clear
+
+Screensavers (optional duration in seconds):
+  screen fire [seconds]
+  screen clock [seconds]
+  screen matrix [seconds]
+
+Other modes:
+  screen mirror
+  screen game <invaders|tetris|buggy|snake|pacman|shooter|bomberman|breakout|asteroids|battleship>
+
+Controller:
+  screen controller        scan for Bluetooth controller (60 seconds)
+
+SSH keyboard remote:
+  screen remote on         interactive forwarder (ESC to exit)
+  screen remote off        kill a background remote session
+
+Log:
+  screen log               show last 30 lines
+  screen log tail          follow live (Ctrl+C to stop)
+  screen log show          print whole log
+  screen log clear         clear log on disk and in memory
+  screen log copy          save timestamped copy to home directory
+USAGE
+    exit 1
+}
+
+_check_fifo() {
+    if [[ ! -p "$FIFO" ]]; then
+        echo "Error: FIFO not found at $FIFO — is tv_menu.py running?" >&2
+        echo "       Check: systemctl status pitv-menu" >&2
+        exit 1
+    fi
+}
+
+_send() {
+    _check_fifo
+    timeout 3 bash -c "echo $(printf '%q' "$1") > '$FIFO'" 2>/dev/null \
+        || { echo "Error: timeout writing to FIFO" >&2; exit 1; }
+}
+
+_send_raw() {
+    _check_fifo
+    timeout 3 bash -c "echo \"$1\" > '$FIFO'" 2>/dev/null \
+        || { echo "Error: timeout writing to FIFO" >&2; exit 1; }
+}
+
+[[ $# -eq 0 ]] && usage
+
+CMD="${1,,}"
+
+case "$CMD" in
+    up|down|left|right|back|clear)
+        _send "${CMD^^}"
+        ;;
+
+    enter)
+        _send "SELECT"
+        ;;
+
+    fire|clock|matrix)
+        DUR="${2:-INDEFINITE}"
+        _send "RUN ${CMD^^} ${DUR}"
+        ;;
+
+    mirror)
+        _send "RUN MIRROR INDEFINITE"
+        ;;
+
+    game)
+        KEY="${2:-}"
+        [[ -z "$KEY" ]] && { echo "Usage: screen game <name>" >&2; exit 1; }
+        case "${KEY,,}" in
+            inv|invaders|space) KEY="INVADERS"   ;;
+            tet|tetris)         KEY="TETRIS"      ;;
+            buggy|moon)         KEY="BUGGY"       ;;
+            snake|sn)           KEY="SNAKE"       ;;
+            pac|pacman)         KEY="PACMAN"      ;;
+            shoot|shooter|bsu)  KEY="SHOOTER"     ;;
+            bomb|bomberman)     KEY="BOMBERMAN"   ;;
+            break|breakout)     KEY="BREAKOUT"    ;;
+            aster|asteroids)    KEY="ASTEROIDS"   ;;
+            battle|battleship)  KEY="BATTLESHIP"  ;;
+            *)                  KEY="${KEY^^}"    ;;
+        esac
+        _send_raw "RUN GAME INDEFINITE ${KEY}"
+        ;;
+
+    controller)
+        _send "SCAN_CONTROLLER"
+        echo "Scanning for Bluetooth controller for 60 seconds..."
+        echo "Make sure your controller is in pairing/connection mode."
+        ;;
+
+    remote)
+        case "${2:-}" in
+            on)
+                [[ ! -f "$REMOTE_SCRIPT" ]] && {
+                    echo "Error: $REMOTE_SCRIPT not found" >&2; exit 1; }
+                _check_fifo
+                exec python3 "$REMOTE_SCRIPT"
+                ;;
+            off)
+                pkill -f "remote.py" 2>/dev/null \
+                    && echo "Remote session stopped." \
+                    || echo "No remote session found."
+                ;;
+            *)
+                echo "Usage: screen remote on|off" >&2; exit 1 ;;
+        esac
+        ;;
+
+    log)
+        case "${2:-}" in
+            tail)
+                tail -f /tmp/pitv.log
+                ;;
+            show)
+                cat /tmp/pitv.log 2>/dev/null || echo "No log yet."
+                ;;
+            clear)
+                > /tmp/pitv.log 2>/dev/null || true
+                _send "LOG_CLEAR"
+                echo "Log cleared."
+                ;;
+            copy)
+                DEST="$HOME/pitv-$(date +%Y%m%d-%H%M%S).log"
+                cp /tmp/pitv.log "$DEST" 2>/dev/null \
+                    && echo "Log saved to $DEST" \
+                    || echo "No log file found."
+                ;;
+            "")
+                tail -n 30 /tmp/pitv.log 2>/dev/null || echo "No log yet."
+                ;;
+            *)
+                echo "Usage: screen log [tail|show|clear|copy]" >&2; exit 1 ;;
+        esac
+        ;;
+
+    *)
+        echo "Unknown command: $CMD" >&2
+        usage
+        ;;
+esac

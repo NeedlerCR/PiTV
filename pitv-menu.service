@@ -1,0 +1,43 @@
+[Unit]
+Description=PiTV Menu Display
+# multi-user.target means the system is fully booted — no more kernel/systemd
+# messages scrolling through tty1 after we take it over.
+After=multi-user.target
+Conflicts=getty@tty1.service
+
+[Service]
+Type=simple
+User=charlieneedler
+Group=charlieneedler
+
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty
+StandardOutput=tty
+StandardError=journal
+
+Environment=TERM=linux
+Environment=HOME=/home/charlieneedler
+WorkingDirectory=/opt/pitv
+
+# 1) Set a large console font (tries several paths, picks the first that exists)
+ExecStartPre=-/bin/sh -c '\
+    for f in \
+        /usr/share/consolefonts/Uni3-TerminusBold32x16.psf.gz \
+        /usr/share/consolefonts/TerminusBold32x16.psf.gz \
+        /usr/share/consolefonts/Terminus32x16.psf.gz \
+        /usr/share/consolefonts/Uni2-TerminusBold28x14.psf.gz \
+        /usr/share/consolefonts/TerminusBold28x14.psf.gz; \
+    do [ -f "$$f" ] && setfont "$$f" && break; done'
+
+# 2) Clear any leftover boot messages from tty1 so the menu starts on a blank screen
+ExecStartPre=-/bin/sh -c 'printf "\033[2J\033[H" > /dev/tty1'
+
+ExecStart=/usr/bin/python3 /opt/pitv/tv_menu.py
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
