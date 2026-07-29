@@ -126,6 +126,8 @@ _JOY_COOLDOWN         = 0.25
 #                     here except HOME so we don't inject BACK and kill the game
 #   "GAME_INTERNAL" → the built-in snake is running; feed raw directions
 #                     (UP/DOWN/LEFT/RIGHT) straight into the input queue
+#   "KEYPAD"        → an OTP / lock keypad is on screen; D-pad and sticks
+#                     navigate the grid (raw L/R/U/D), A=press, B=delete/back
 controller_mode = "MENU"
 
 KEYPAD_LAYOUT = [
@@ -157,7 +159,7 @@ GAME_KEYS = {
     "BOMBERMAN":  ["bombardier"],
     "BREAKOUT":   ["lbreakout2"],
     "SHOOTER":    ["chromium-bsu"],
-    "ASTEROIDS":  ["kobodeluxe"],
+    "ASTEROIDS":  ["kobodl"],           # kobodeluxe package installs binary as 'kobodl'
     "BATTLESHIP": ["bs"],
 }
 
@@ -171,7 +173,7 @@ GAME_OPTIONS = [
     ("BOMBERMAN",      ["bombardier"],      "BOMBERMAN",  False),
     ("BREAKOUT",       ["lbreakout2"],      "BREAKOUT",   False),
     ("SPACE SHOOTER",  ["chromium-bsu"],    "SHOOTER",    False),
-    ("ASTEROID BELT",  ["kobodeluxe"],      "ASTEROIDS",  False),
+    ("ASTEROID BELT",  ["kobodl"],          "ASTEROIDS",  False),
     ("BATTLESHIP [2P]",["bs"],             "BATTLESHIP", True),
 ]
 
@@ -235,14 +237,20 @@ def _handle_controller_event(event) -> None:
             # inputs would double-fire, so ignore everything but HOME (above).
             return
 
-        if mode == "GAME_INTERNAL":
-            # Built-in game: hand it raw directions and a quit button.
+        if mode in ("GAME_INTERNAL", "KEYPAD"):
+            # Both want raw D-pad directions; only the face buttons differ.
             if c == ecodes.BTN_DPAD_UP:      input_queue.append("UP")
             elif c == ecodes.BTN_DPAD_DOWN:  input_queue.append("DOWN")
             elif c == ecodes.BTN_DPAD_LEFT:  input_queue.append("LEFT")
             elif c == ecodes.BTN_DPAD_RIGHT: input_queue.append("RIGHT")
-            elif c in (ecodes.BTN_SOUTH, ecodes.BTN_EAST):  # A / B → quit
+            elif c == ecodes.BTN_EAST:       # A
+                # Keypad: press the highlighted key. Game: quit.
+                input_queue.append("SELECT" if mode == "KEYPAD" else "BACK")
+            elif c == ecodes.BTN_SOUTH:      # B → back (keypad: delete/exit)
                 input_queue.append("BACK")
+            elif c in (ecodes.BTN_THUMBL, ecodes.BTN_THUMBR):
+                if mode == "KEYPAD":
+                    input_queue.append("SELECT")
             return
 
         # ── MENU navigation ──
@@ -271,7 +279,7 @@ def _handle_controller_event(event) -> None:
         if mode == "GAME_EXTERNAL":
             return
 
-        game = (mode == "GAME_INTERNAL")
+        game = mode in ("GAME_INTERNAL", "KEYPAD")   # raw L/R directions
 
         if event.code == ecodes.ABS_HAT0Y:
             if event.value == -1:
@@ -585,7 +593,7 @@ def run_game(stdscr, cmd_list: list):
             "bombardier":     "bombardier",
             "lbreakout2":     "lbreakout2",
             "chromium-bsu":   "chromium-bsu",
-            "kobodeluxe":     "kobodeluxe",
+            "kobodl":         "kobodeluxe",
             "bs":             "bsdgames",
         }.get(binary, binary)
         msg = [
@@ -610,7 +618,7 @@ def run_game(stdscr, cmd_list: list):
     _reset_terminal()
     os.system("clear")
 
-    SDL_GAMES = {"chromium-bsu", "lbreakout2", "kobodeluxe"}
+    SDL_GAMES = {"chromium-bsu", "lbreakout2", "kobodl"}
     is_sdl    = binary in SDL_GAMES
 
     # Controller-to-keys mapper for ncurses games
@@ -800,6 +808,99 @@ def run_snake(stdscr):
         input_queue.clear()
         stdscr.clear()
         log(f"Snake: stop (score {score})")
+
+
+def run_mirror(stdscr):
+    """
+    AirPlay screen mirroring via uxplay.
+
+    Modelled on run_game(): we must release the console (endwin) before
+    starting, because only one program can drive the display device at a
+    time. Previously the mirror screen kept a curses UI refreshing the
+    framebuffer (fbcon) while uxplay's kmssink tried to take the same
+    display — audio streamed but video never showed. Ending curses frees the
+    framebuffer, and 'kmssink force-modesetting=true' lets kmssink set the
+    display mode even though fbcon still owns the console.
+    """
+    UXPLAY_LOG = "/tmp/uxplay.log"
+    log("Mirror: starting uxplay (kmssink force-modesetting + software decode)")
+
+    curses.def_prog_mode()
+    curses.endwin()
+    _reset_terminal()
+    os.system("clear")
+    print("AirPlay receiver 'PiTV' is ready.\n"
+          "  iPhone/iPad/Mac: Control Centre -> Screen Mirroring -> PiTV\n"
+          "  (phone and Pi must share the same Wi-Fi network)\n"
+          "Press BACK / B / HOME to stop.\n", flush=True)
+
+    try:
+        logf = open(UXPLAY_LOG, "w")
+    except Exception:
+        logf = subprocess.DEVNULL
+
+    try:
+        proc = subprocess.Popen(
+            ["uxplay", "-n", "PiTV",
+             "-vs", "kmssink force-modesetting=true",   # one argv token = quoted sink
+             "-avdec"],
+            stdout=logf, stderr=subprocess.STDOUT,
+        )
+    except FileNotFoundError:
+        log("ERROR: uxplay not found")
+        if logf not in (None, subprocess.DEVNULL):
+            try: logf.close()
+            except Exception: pass
+        print("\nuxplay is not installed. Install it with:\n"
+              "  sudo apt install uxplay gstreamer1.0-plugins-bad \\\n"
+              "      gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly\n"
+              "If it starts but the phone can't find it, enable mDNS:\n"
+              "  sudo systemctl enable --now avahi-daemon\n", flush=True)
+        time.sleep(6)
+        curses.reset_prog_mode(); curses.curs_set(0)
+        return
+
+    # Monitor for exit (BACK/HOME from FIFO/CEC/controller) or an early crash.
+    died = False
+    while True:
+        while input_queue:
+            c = input_queue.pop(0)
+            if c in ("BACK", "HOME"):
+                proc.terminate()
+                break
+        if proc.poll() is not None:
+            died = (proc.returncode not in (0, -15))   # -15 = SIGTERM (our stop)
+            break
+        time.sleep(0.1)
+
+    if proc.poll() is None:
+        proc.terminate()
+        try: proc.wait(timeout=2)
+        except subprocess.TimeoutExpired: proc.kill()
+
+    if logf not in (None, subprocess.DEVNULL):
+        try: logf.close()
+        except Exception: pass
+
+    if died:
+        # uxplay exited on its own — show why (usually a kmssink/DRM or mDNS
+        # error) so the failure is visible instead of a silent black screen.
+        log("uxplay exited unexpectedly — see /tmp/uxplay.log")
+        try:
+            with open(UXPLAY_LOG) as f:
+                tail = [ln.rstrip() for ln in f if ln.strip()][-8:]
+        except Exception:
+            tail = []
+        print("\nScreen mirroring stopped unexpectedly. Last output:", flush=True)
+        for ln in tail:
+            print("  " + ln, flush=True)
+        print("\nIf video never appeared: try '-vs fbdevsink', or set "
+              "gpu_mem=128 in /boot/firmware/config.txt.\n"
+              "Full log: cat /tmp/uxplay.log\n", flush=True)
+        time.sleep(6)
+
+    log("Mirror: stopped")
+    curses.reset_prog_mode(); curses.curs_set(0)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1043,7 +1144,7 @@ def draw_duration_menu(stdscr, art_label, sel):
 
 
 def draw_keypad(stdscr, game_name, entered, error, is_lock=False):
-    """On-screen numpad. Navigate with D-pad/joystick, A/Right to press."""
+    """On-screen numpad. D-pad/joystick move, A enters, B deletes/back."""
     global keypad_row, keypad_col, lock_entered
     max_y, max_x = stdscr.getmaxyx()
     stdscr.erase()
@@ -1084,55 +1185,12 @@ def draw_keypad(stdscr, game_name, entered, error, is_lock=False):
     hint = "Open your authenticator app for the code"
     if is_lock:
         hint = "Enter emergency code to unlock system"
+    controls = "D-pad/Stick: move   A: enter   B: delete (or back when empty)"
     try:
-        stdscr.addstr(gy+9, max(0,(max_x-len(hint))//2), hint, curses.color_pair(3)|curses.A_DIM)
+        stdscr.addstr(gy+9,  max(0,(max_x-len(hint))//2),     hint,     curses.color_pair(3)|curses.A_DIM)
+        stdscr.addstr(gy+10, max(0,(max_x-len(controls))//2), controls, curses.color_pair(3)|curses.A_DIM)
     except curses.error:
         pass
-
-
-def draw_mirror_screen(stdscr, ok, err_lines=None):
-    max_y, max_x = stdscr.getmaxyx()
-    stdscr.erase()
-    title = "SCREEN MIRRORING ACTIVE" if ok else "SCREEN MIRROR — ERROR"
-    color = curses.color_pair(2) if ok else curses.color_pair(1)
-    try:
-        stdscr.addstr(2, max(0,(max_x-len(title))//2), title, color|curses.A_BOLD)
-    except curses.error:
-        pass
-    if ok:
-        lines = [
-            "", "iPhone / iPad / Mac:",
-            "   Control Centre → Screen Mirroring → 'PiTV'",
-            "",
-            "Not seeing 'PiTV' in the list?",
-            "   • Phone and Pi must be on the SAME Wi-Fi network.",
-            "   • AirPlay discovery needs avahi (Bonjour/mDNS):",
-            "       sudo systemctl enable --now avahi-daemon",
-            "   • Give it 5-10s, then pull down Control Centre again.",
-            "", "Press BACK / B to stop.",
-        ]
-    else:
-        lines = [
-            "", "uxplay is not running — nothing to discover.", "",
-            "If it's not installed:",
-            "   sudo apt install uxplay gstreamer1.0-plugins-bad \\",
-            "       gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly",
-            "",
-            "If it starts then dies, it's usually mDNS/Bonjour:",
-            "   sudo systemctl enable --now avahi-daemon",
-            "",
-            "Full output: screen log, or cat /tmp/uxplay.log",
-        ]
-        if err_lines:
-            lines.append("")
-            lines.append("Last uxplay output:")
-            lines.extend("   " + ln for ln in err_lines)
-        lines += ["", "Press BACK to return."]
-    for i, line in enumerate(lines):
-        if 4 + i >= max_y - 1:
-            break
-        try: stdscr.addstr(4+i, 4, line[:max_x-6], curses.color_pair(4))
-        except curses.error: pass
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1174,6 +1232,7 @@ def main(stdscr):
     global lock_entered, lock_error
     global pending_game_key, pending_game_cmd
     global otp_fail_count, system_locked, log_visible
+    global controller_mode
 
     curses.curs_set(0)
     stdscr.nodelay(True)
@@ -1188,11 +1247,6 @@ def main(stdscr):
 
     frame       = 0
     last_view   = None
-    mirror_proc = None
-    mirror_log  = None
-    mirror_err: list = []
-    uxplay_ok   = True
-    UXPLAY_LOG  = "/tmp/uxplay.log"
 
     # W-then-3 log toggle state
     last_key_char = ""
@@ -1205,41 +1259,10 @@ def main(stdscr):
             reset_renderer_state()
             should_clear_screen = True
 
-            if current_view == "MIRROR_ACTIVE":
-                log("Starting uxplay (kmssink + software decode)")
-                mirror_err = []
-                try:
-                    # Pi OS Lite has no X11 — kmssink is required for framebuffer
-                    # output, and -avdec forces software decoding since VAAPI
-                    # hardware decode isn't configured on this system.
-                    #
-                    # Capture uxplay's output (it was previously discarded): the
-                    # #1 reason the receiver never shows up in the iPhone's
-                    # Screen-Mirroring list is a Bonjour/mDNS registration
-                    # failure, and uxplay prints exactly that on stderr.
-                    mirror_log  = open(UXPLAY_LOG, "w")
-                    mirror_proc = subprocess.Popen(
-                        ["uxplay", "-n", "PiTV", "-vs", "kmssink", "-avdec"],
-                        stdout=mirror_log, stderr=subprocess.STDOUT,
-                    )
-                    uxplay_ok = True
-                except FileNotFoundError:
-                    log("ERROR: uxplay not found")
-                    mirror_proc = None; uxplay_ok = False
-                    if mirror_log:
-                        try: mirror_log.close()
-                        except Exception: pass
-                        mirror_log = None
-
-            if last_view == "MIRROR_ACTIVE":
-                if mirror_proc and mirror_proc.poll() is None:
-                    mirror_proc.terminate()
-                    log("uxplay stopped")
-                mirror_proc = None
-                if mirror_log:
-                    try: mirror_log.close()
-                    except Exception: pass
-                    mirror_log = None
+            # A code keypad needs raw D-pad/stick navigation; everything else
+            # in the main loop uses normal menu navigation. (The blocking game
+            # runners set their own mode while they're on screen.)
+            controller_mode = "KEYPAD" if current_view in ("KEYPAD", "LOCKED") else "MENU"
 
             if current_view in ("KEYPAD",):
                 keypad_row = keypad_col = 0
@@ -1290,11 +1313,16 @@ def main(stdscr):
                     keypad_row = (keypad_row-1) % len(KEYPAD_LAYOUT)
                 elif cmd == "DOWN":
                     keypad_row = (keypad_row+1) % len(KEYPAD_LAYOUT)
-                elif cmd in ("LEFT","BACK"):
+                elif cmd == "LEFT":
                     keypad_col = (keypad_col-1) % 3
-                elif cmd in ("RIGHT",):
+                elif cmd == "RIGHT":
                     keypad_col = (keypad_col+1) % 3
-                elif cmd in ("SELECT",):
+                elif cmd == "BACK":
+                    # B deletes the last digit; there's no "leaving" a lockout.
+                    if lock_entered:
+                        lock_entered, _ = keypad_press("DEL", "LOCK")
+                        lock_error = ""
+                elif cmd == "SELECT":
                     key = KEYPAD_LAYOUT[keypad_row][keypad_col]
                     entered, verify = keypad_press(key, "LOCK")
                     if verify:
@@ -1311,14 +1339,10 @@ def main(stdscr):
 
             # ── HOME: return to main menu from anywhere ──────────────
             if cmd == "HOME":
-                if mirror_proc and mirror_proc.poll() is None:
-                    mirror_proc.terminate(); mirror_proc = None
                 current_view = "MENU"
                 break
 
             if cmd == "CLEAR":
-                if mirror_proc and mirror_proc.poll() is None:
-                    mirror_proc.terminate(); mirror_proc = None
                 current_view = "CLEAR"
                 break
 
@@ -1333,7 +1357,8 @@ def main(stdscr):
                         if gc: run_game(stdscr, gc)
                     current_view = "MENU"
                 elif art_key == "MIRROR":
-                    current_view = "MIRROR_ACTIVE"
+                    run_mirror(stdscr)
+                    current_view = "MENU"
                 elif art_key == "GAMES":
                     current_view = "GAMES_MENU"
                 elif art_key in ("CLOCK","MATRIX"):
@@ -1356,7 +1381,9 @@ def main(stdscr):
                     selected_art_idx = (selected_art_idx+1) % len(ART_OPTIONS)
                 elif cmd in ("SELECT","RIGHT"):
                     _, art_type, art_key = ART_OPTIONS[selected_art_idx]
-                    if art_key == "MIRROR": current_view = "MIRROR_ACTIVE"
+                    if art_key == "MIRROR":
+                        run_mirror(stdscr)
+                        current_view = "MENU"
                     elif art_key == "GAMES": current_view = "GAMES_MENU"
                     else: current_view = "DURATION_SELECT"
                 elif cmd in ("BACK","LEFT"):
@@ -1401,17 +1428,22 @@ def main(stdscr):
                         current_view     = "KEYPAD"
 
             elif current_view == "KEYPAD":
-                if cmd in ("BACK","LEFT"):
-                    current_view = "GAMES_MENU"
-                elif cmd == "UP":
+                if cmd == "UP":
                     keypad_row = (keypad_row-1) % len(KEYPAD_LAYOUT)
                 elif cmd == "DOWN":
                     keypad_row = (keypad_row+1) % len(KEYPAD_LAYOUT)
-                elif cmd in ("LEFT",):
+                elif cmd == "LEFT":
                     keypad_col = (keypad_col-1) % 3
-                elif cmd in ("RIGHT",):
+                elif cmd == "RIGHT":
                     keypad_col = (keypad_col+1) % 3
-                elif cmd in ("SELECT",):
+                elif cmd == "BACK":
+                    # B deletes the last digit; on an empty code it goes back.
+                    if keypad_entered:
+                        keypad_entered, _ = keypad_press("DEL", "GAME")
+                        keypad_error = ""
+                    else:
+                        current_view = "GAMES_MENU"
+                elif cmd == "SELECT":
                     key = KEYPAD_LAYOUT[keypad_row][keypad_col]
                     entered, verify = keypad_press(key, "GAME")
                     if verify:
@@ -1429,12 +1461,6 @@ def main(stdscr):
                             else:
                                 keypad_error   = f"WRONG CODE — {remaining} attempt(s) left"
                                 keypad_entered = ""
-
-            elif current_view == "MIRROR_ACTIVE":
-                if cmd in ("BACK","LEFT"):
-                    if mirror_proc and mirror_proc.poll() is None:
-                        mirror_proc.terminate(); mirror_proc = None
-                    current_view = "MENU"
 
             elif current_view in ("ART_RUNNING","CLEAR"):
                 if cmd in ("BACK","SELECT","LEFT"):
@@ -1480,22 +1506,6 @@ def main(stdscr):
                               curses.A_REVERSE|curses.A_DIM)
             except curses.error:
                 pass
-
-        elif current_view == "MIRROR_ACTIVE":
-            # If uxplay exited on its own it never became discoverable — surface
-            # the tail of its output so the failure is visible on the TV.
-            if uxplay_ok and mirror_proc and mirror_proc.poll() is not None:
-                uxplay_ok = False
-                log(f"uxplay exited early (code {mirror_proc.returncode})")
-                try:
-                    if mirror_log and not mirror_log.closed:
-                        mirror_log.flush()
-                    with open(UXPLAY_LOG) as f:
-                        mirror_err = [ln.rstrip() for ln in f if ln.strip()][-6:]
-                except Exception:
-                    mirror_err = []
-            draw_mirror_screen(stdscr, uxplay_ok, mirror_err)
-            draw_log_panel(stdscr)
 
         elif current_view == "CLEAR":
             pass
