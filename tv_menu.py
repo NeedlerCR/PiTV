@@ -119,6 +119,15 @@ _controller_scan_event.set()   # scan immediately on startup
 _last_joy_time: float = 0.0
 _JOY_COOLDOWN         = 0.25
 
+# How the controller listener should interpret input right now:
+#   "MENU"          → D-pad/stick drive menu navigation (LEFT=back, RIGHT=select)
+#   "GAME_EXTERNAL" → a subprocess game is running; movement is delivered by
+#                     controller-to-keys.py (uinput), so suppress everything
+#                     here except HOME so we don't inject BACK and kill the game
+#   "GAME_INTERNAL" → the built-in snake is running; feed raw directions
+#                     (UP/DOWN/LEFT/RIGHT) straight into the input queue
+controller_mode = "MENU"
+
 KEYPAD_LAYOUT = [
     ["1", "2", "3"],
     ["4", "5", "6"],
@@ -210,9 +219,33 @@ def _handle_controller_event(event) -> None:
     if not EVDEV_OK:
         return
 
+    mode = controller_mode
+
     if event.type == ecodes.EV_KEY and event.value == 1:   # key-down only
         c = event.code
 
+        # HOME button always returns to the main menu / exits a running game.
+        if c == ecodes.BTN_MODE:
+            input_queue.append("HOME")
+            return
+
+        if mode == "GAME_EXTERNAL":
+            # Movement is injected by controller-to-keys.py as real key events.
+            # If we also queued BACK/SELECT here the game would exit or the
+            # inputs would double-fire, so ignore everything but HOME (above).
+            return
+
+        if mode == "GAME_INTERNAL":
+            # Built-in game: hand it raw directions and a quit button.
+            if c == ecodes.BTN_DPAD_UP:      input_queue.append("UP")
+            elif c == ecodes.BTN_DPAD_DOWN:  input_queue.append("DOWN")
+            elif c == ecodes.BTN_DPAD_LEFT:  input_queue.append("LEFT")
+            elif c == ecodes.BTN_DPAD_RIGHT: input_queue.append("RIGHT")
+            elif c in (ecodes.BTN_SOUTH, ecodes.BTN_EAST):  # A / B → quit
+                input_queue.append("BACK")
+            return
+
+        # ── MENU navigation ──
         if c == ecodes.BTN_DPAD_UP:
             input_queue.append("UP")
         elif c == ecodes.BTN_DPAD_DOWN:
@@ -233,10 +266,13 @@ def _handle_controller_event(event) -> None:
         elif c == ecodes.BTN_START:          # + button → select
             input_queue.append("SELECT")
 
-        elif c == ecodes.BTN_MODE:           # HOME button → go to main menu
-            input_queue.append("HOME")
-
     elif event.type == ecodes.EV_ABS:
+        # In GAME_EXTERNAL the mapper owns the sticks/D-pad entirely.
+        if mode == "GAME_EXTERNAL":
+            return
+
+        game = (mode == "GAME_INTERNAL")
+
         if event.code == ecodes.ABS_HAT0Y:
             if event.value == -1:
                 input_queue.append("UP")
@@ -244,19 +280,26 @@ def _handle_controller_event(event) -> None:
                 input_queue.append("DOWN")
         elif event.code == ecodes.ABS_HAT0X:
             if event.value == -1:
-                input_queue.append("BACK")   # hat LEFT  → back
+                input_queue.append("LEFT" if game else "BACK")   # hat LEFT
             elif event.value == 1:
-                input_queue.append("SELECT") # hat RIGHT → select
-        elif event.code == ecodes.ABS_Y:
-            # Left joystick Y: up/down navigation with debounce
+                input_queue.append("RIGHT" if game else "SELECT") # hat RIGHT
+        elif event.code in (ecodes.ABS_Y, ecodes.ABS_X):
+            # Left joystick, debounced so a held stick doesn't flood the queue.
             now = time.time()
-            if now - _last_joy_time >= _JOY_COOLDOWN:
+            if now - _last_joy_time < _JOY_COOLDOWN:
+                return
+            if event.code == ecodes.ABS_Y:
                 if event.value < -8000:
-                    input_queue.append("UP")
-                    _last_joy_time = now
+                    input_queue.append("UP");   _last_joy_time = now
                 elif event.value > 8000:
-                    input_queue.append("DOWN")
-                    _last_joy_time = now
+                    input_queue.append("DOWN"); _last_joy_time = now
+            else:  # ABS_X — horizontal only steers a game (menus have no L/R nav)
+                if not game:
+                    return
+                if event.value < -8000:
+                    input_queue.append("LEFT");  _last_joy_time = now
+                elif event.value > 8000:
+                    input_queue.append("RIGHT"); _last_joy_time = now
 
 
 def listen_controllers() -> None:
@@ -416,6 +459,8 @@ def listen_cec_remote():
                     log(f"CEC: {key}")
                     if   key == "up":                        input_queue.append("UP")
                     elif key == "down":                      input_queue.append("DOWN")
+                    elif key == "left":                      input_queue.append("LEFT")
+                    elif key == "right":                     input_queue.append("RIGHT")
                     elif key in ("select","enter"):          input_queue.append("SELECT")
                     elif key in ("exit","back","clear","return"): input_queue.append("BACK")
             proc.wait()
@@ -525,6 +570,7 @@ def run_game(stdscr, cmd_list: list):
     - Starts the controller-to-keys mapper for ncurses games.
     - Exits on BACK or HOME from the FIFO/controller.
     """
+    global controller_mode
     binary = cmd_list[0]
 
     # ── Pre-flight: is the binary installed? (checks /usr/games too) ──
@@ -585,36 +631,175 @@ def run_game(stdscr, cmd_list: list):
         env["SDL_VIDEODRIVER"] = "kmsdrm"
         env["SDL_AUDIODRIVER"]  = "alsa"
 
+    # While the game runs the controller listener must stop injecting menu
+    # commands — the mapper delivers movement as real key events instead.
+    controller_mode = "GAME_EXTERNAL"
     try:
-        proc = subprocess.Popen(cmd_list, env=env)
-    except Exception as e:
-        log(f"ERROR launching {binary}: {e}")
-        _reset_terminal()
-        if mapper_proc: mapper_proc.terminate()
-        curses.reset_prog_mode(); curses.curs_set(0)
-        show_message(stdscr, ["LAUNCH ERROR", "", str(e)], color_pair=1, duration=3.0)
-        return
+        try:
+            proc = subprocess.Popen(cmd_list, env=env)
+        except Exception as e:
+            log(f"ERROR launching {binary}: {e}")
+            _reset_terminal()
+            if mapper_proc: mapper_proc.terminate()
+            curses.reset_prog_mode(); curses.curs_set(0)
+            show_message(stdscr, ["LAUNCH ERROR", "", str(e)], color_pair=1, duration=3.0)
+            return
 
-    while True:
-        while input_queue:
-            c = input_queue.pop(0)
-            if c in ("BACK", "HOME"):
-                proc.terminate()
+        while True:
+            while input_queue:
+                c = input_queue.pop(0)
+                if c in ("BACK", "HOME"):
+                    proc.terminate()
+                    break
+            if proc.poll() is not None:
                 break
-        if proc.poll() is not None:
-            break
-        time.sleep(0.1)
+            time.sleep(0.1)
 
-    if proc.poll() is None:
-        proc.terminate()
-        try: proc.wait(timeout=2)
-        except subprocess.TimeoutExpired: proc.kill()
+        if proc.poll() is None:
+            proc.terminate()
+            try: proc.wait(timeout=2)
+            except subprocess.TimeoutExpired: proc.kill()
 
-    if mapper_proc and mapper_proc.poll() is None:
-        mapper_proc.terminate()
+        if mapper_proc and mapper_proc.poll() is None:
+            mapper_proc.terminate()
+    finally:
+        controller_mode = "MENU"
 
     log(f"Game stop: {binary}")
     curses.reset_prog_mode(); curses.curs_set(0)
+
+
+def run_snake(stdscr):
+    """
+    Built-in snake game.
+
+    Replaces bsdgames' `snake`, which has no speed control and runs far too
+    fast to actually play on a TV.  Because it's pure curses and reads the
+    shared input_queue directly, D-pad LEFT/RIGHT, the analog sticks, the
+    keyboard arrows and the CEC remote all steer the snake the same way —
+    no controller-to-keys mapper needed.
+    """
+    global controller_mode
+    log("Snake: start (built-in)")
+    controller_mode = "GAME_INTERNAL"
+    input_queue.clear()
+
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+
+    DIRS   = {"UP": (0, -1), "DOWN": (0, 1), "LEFT": (-1, 0), "RIGHT": (1, 0)}
+    quit_game = False
+    score     = 0
+
+    try:
+        max_y, max_x = stdscr.getmaxyx()
+        top, left    = 1, 1
+        bottom       = max_y - 2          # leave a row for the status bar
+        right        = max_x - 2
+        if (right - left) < 12 or (bottom - top) < 6:
+            show_message(stdscr, ["SCREEN TOO SMALL FOR SNAKE"],
+                         color_pair=1, duration=2.0)
+            return
+
+        cx, cy      = left + (right - left) // 2, top + (bottom - top) // 2
+        snake       = [(cx - 2, cy), (cx - 1, cy), (cx, cy)]   # tail … head
+        direction   = (1, 0)                                   # committed heading
+        pending_dir = direction                                # next turn to apply
+
+        def place_food():
+            while True:
+                fx = random.randint(left, right)
+                fy = random.randint(top, bottom)
+                if (fx, fy) not in snake:
+                    return (fx, fy)
+
+        food = place_food()
+
+        # Seconds per step.  Deliberately gentle for a TV; eases up as you grow.
+        BASE_TICK = 0.18
+        MIN_TICK  = 0.09
+        tick      = BASE_TICK
+        last_step = time.time()
+
+        while True:
+            # ── Keyboard (fed into the same queue as controller/CEC) ──
+            try:
+                ch = stdscr.getch()
+                if ch != -1:
+                    if   ch == curses.KEY_UP:    input_queue.append("UP")
+                    elif ch == curses.KEY_DOWN:  input_queue.append("DOWN")
+                    elif ch == curses.KEY_LEFT:  input_queue.append("LEFT")
+                    elif ch == curses.KEY_RIGHT: input_queue.append("RIGHT")
+                    elif ch in (27, ord("q")):   input_queue.append("BACK")
+            except curses.error:
+                pass
+
+            # ── Drain queued directions. Validate every turn against the
+            # committed heading (not against each other) so chaining several
+            # inputs inside one tick can never fold the snake back on itself. ──
+            while input_queue:
+                cmd = input_queue.pop(0)
+                if cmd in ("BACK", "HOME"):
+                    quit_game = True
+                    break
+                if cmd in DIRS:
+                    d = DIRS[cmd]
+                    if d[0] != -direction[0] or d[1] != -direction[1]:  # no U-turn
+                        pending_dir = d
+            if quit_game:
+                break
+
+            # ── Advance on the tick (commit exactly one turn per step) ──
+            now = time.time()
+            if now - last_step >= tick:
+                last_step = now
+                direction = pending_dir
+                hx, hy = snake[-1]
+                nx, ny = hx + direction[0], hy + direction[1]
+                if (nx < left or nx > right or ny < top or ny > bottom
+                        or (nx, ny) in snake):
+                    break                                   # crash → game over
+                snake.append((nx, ny))
+                if (nx, ny) == food:
+                    score += 1
+                    food  = place_food()
+                    tick  = max(MIN_TICK, BASE_TICK - score * 0.004)
+                else:
+                    snake.pop(0)
+
+            # ── Render ──
+            stdscr.erase()
+            try:
+                stdscr.attron(curses.color_pair(2))
+                stdscr.border()
+                stdscr.attroff(curses.color_pair(2))
+                stdscr.addch(food[1], food[0], "@",
+                             curses.color_pair(1) | curses.A_BOLD)
+                for i, (sx, sy) in enumerate(snake):
+                    glyph = "O" if i == len(snake) - 1 else "o"
+                    stdscr.addch(sy, sx, glyph,
+                                 curses.color_pair(2) | curses.A_BOLD)
+            except curses.error:
+                pass
+            status = f" SNAKE   Score: {score}   D-pad/Stick to steer   B/BACK to quit "
+            try:
+                stdscr.addstr(max_y - 1, 0, status.center(max_x - 1),
+                              curses.A_REVERSE | curses.A_DIM)
+            except curses.error:
+                pass
+            stdscr.refresh()
+            time.sleep(0.01)
+
+        if not quit_game:
+            show_message(stdscr,
+                         ["GAME OVER", "", f"Score: {score}", "",
+                          "Returning to menu…"],
+                         color_pair=1, duration=2.5)
+    finally:
+        controller_mode = "MENU"
+        input_queue.clear()
+        stdscr.clear()
+        log(f"Snake: stop (score {score})")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -834,7 +1019,9 @@ def draw_games_menu(stdscr, sel):
     def badge(key, is2p):
         tags = (["FREE"] if key in FREE_GAMES else ["LOCK"])
         if is2p: tags.append("2P")
-        if not resolve_binary(GAME_KEYS.get(key, [key])[0]): tags.append("N/A")
+        # SNAKE is built-in (no external binary), so it's never "N/A".
+        if key != "SNAKE" and not resolve_binary(GAME_KEYS.get(key, [key])[0]):
+            tags.append("N/A")
         return "  [" + "/".join(tags) + "]"
 
     labels = [label + badge(key, is2p) for label,_,key,is2p in GAME_OPTIONS]
@@ -903,7 +1090,7 @@ def draw_keypad(stdscr, game_name, entered, error, is_lock=False):
         pass
 
 
-def draw_mirror_screen(stdscr, ok):
+def draw_mirror_screen(stdscr, ok, err_lines=None):
     max_y, max_x = stdscr.getmaxyx()
     stdscr.erase()
     title = "SCREEN MIRRORING ACTIVE" if ok else "SCREEN MIRROR — ERROR"
@@ -912,19 +1099,39 @@ def draw_mirror_screen(stdscr, ok):
         stdscr.addstr(2, max(0,(max_x-len(title))//2), title, color|curses.A_BOLD)
     except curses.error:
         pass
-    lines = ([
-        "", "iPhone / iPad / Mac:",
-        "   Control Centre → Screen Mirroring → PiTV",
-        "", "Android:", "   Requires scrcpy or a Miracast-compatible app.",
-        "", "Press BACK / B to stop.",
-    ] if ok else [
-        "", "uxplay failed to start.", "",
-        "Install: sudo apt install uxplay gstreamer1.0-plugins-bad",
-        "         gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly",
-        "", "Press BACK to return.",
-    ])
+    if ok:
+        lines = [
+            "", "iPhone / iPad / Mac:",
+            "   Control Centre → Screen Mirroring → 'PiTV'",
+            "",
+            "Not seeing 'PiTV' in the list?",
+            "   • Phone and Pi must be on the SAME Wi-Fi network.",
+            "   • AirPlay discovery needs avahi (Bonjour/mDNS):",
+            "       sudo systemctl enable --now avahi-daemon",
+            "   • Give it 5-10s, then pull down Control Centre again.",
+            "", "Press BACK / B to stop.",
+        ]
+    else:
+        lines = [
+            "", "uxplay is not running — nothing to discover.", "",
+            "If it's not installed:",
+            "   sudo apt install uxplay gstreamer1.0-plugins-bad \\",
+            "       gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly",
+            "",
+            "If it starts then dies, it's usually mDNS/Bonjour:",
+            "   sudo systemctl enable --now avahi-daemon",
+            "",
+            "Full output: screen log, or cat /tmp/uxplay.log",
+        ]
+        if err_lines:
+            lines.append("")
+            lines.append("Last uxplay output:")
+            lines.extend("   " + ln for ln in err_lines)
+        lines += ["", "Press BACK to return."]
     for i, line in enumerate(lines):
-        try: stdscr.addstr(4+i, 4, line, curses.color_pair(4))
+        if 4 + i >= max_y - 1:
+            break
+        try: stdscr.addstr(4+i, 4, line[:max_x-6], curses.color_pair(4))
         except curses.error: pass
 
 
@@ -979,10 +1186,13 @@ def main(stdscr):
     curses.init_pair(4, curses.COLOR_WHITE,   curses.COLOR_BLACK)
     curses.init_pair(5, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
 
-    frame      = 0
-    last_view  = None
+    frame       = 0
+    last_view   = None
     mirror_proc = None
+    mirror_log  = None
+    mirror_err: list = []
     uxplay_ok   = True
+    UXPLAY_LOG  = "/tmp/uxplay.log"
 
     # W-then-3 log toggle state
     last_key_char = ""
@@ -997,24 +1207,39 @@ def main(stdscr):
 
             if current_view == "MIRROR_ACTIVE":
                 log("Starting uxplay (kmssink + software decode)")
+                mirror_err = []
                 try:
                     # Pi OS Lite has no X11 — kmssink is required for framebuffer
                     # output, and -avdec forces software decoding since VAAPI
                     # hardware decode isn't configured on this system.
+                    #
+                    # Capture uxplay's output (it was previously discarded): the
+                    # #1 reason the receiver never shows up in the iPhone's
+                    # Screen-Mirroring list is a Bonjour/mDNS registration
+                    # failure, and uxplay prints exactly that on stderr.
+                    mirror_log  = open(UXPLAY_LOG, "w")
                     mirror_proc = subprocess.Popen(
                         ["uxplay", "-n", "PiTV", "-vs", "kmssink", "-avdec"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        stdout=mirror_log, stderr=subprocess.STDOUT,
                     )
                     uxplay_ok = True
                 except FileNotFoundError:
                     log("ERROR: uxplay not found")
                     mirror_proc = None; uxplay_ok = False
+                    if mirror_log:
+                        try: mirror_log.close()
+                        except Exception: pass
+                        mirror_log = None
 
-            if last_view == "MIRROR_ACTIVE" and mirror_proc:
-                if mirror_proc.poll() is None:
+            if last_view == "MIRROR_ACTIVE":
+                if mirror_proc and mirror_proc.poll() is None:
                     mirror_proc.terminate()
                     log("uxplay stopped")
                 mirror_proc = None
+                if mirror_log:
+                    try: mirror_log.close()
+                    except Exception: pass
+                    mirror_log = None
 
             if current_view in ("KEYPAD",):
                 keypad_row = keypad_col = 0
@@ -1100,8 +1325,12 @@ def main(stdscr):
             if isinstance(cmd, tuple) and cmd[0] == "DIRECT_RUN":
                 _, art_key, dur_sec, payload = cmd
                 if art_key == "GAME":
-                    gc = GAME_KEYS.get(payload.strip().upper())
-                    if gc: run_game(stdscr, gc)
+                    game_key = payload.strip().upper()
+                    if game_key == "SNAKE":
+                        run_snake(stdscr)
+                    else:
+                        gc = GAME_KEYS.get(game_key)
+                        if gc: run_game(stdscr, gc)
                     current_view = "MENU"
                 elif art_key == "MIRROR":
                     current_view = "MIRROR_ACTIVE"
@@ -1160,7 +1389,10 @@ def main(stdscr):
                     current_view = "MENU"
                 elif cmd in ("SELECT","RIGHT"):
                     label, game_cmd, game_key, _ = GAME_OPTIONS[selected_game_idx]
-                    if game_key in FREE_GAMES:
+                    if game_key == "SNAKE":
+                        run_snake(stdscr)
+                        current_view = "GAMES_MENU"
+                    elif game_key in FREE_GAMES:
                         run_game(stdscr, game_cmd)
                         current_view = "GAMES_MENU"
                     else:
@@ -1250,7 +1482,19 @@ def main(stdscr):
                 pass
 
         elif current_view == "MIRROR_ACTIVE":
-            draw_mirror_screen(stdscr, uxplay_ok)
+            # If uxplay exited on its own it never became discoverable — surface
+            # the tail of its output so the failure is visible on the TV.
+            if uxplay_ok and mirror_proc and mirror_proc.poll() is not None:
+                uxplay_ok = False
+                log(f"uxplay exited early (code {mirror_proc.returncode})")
+                try:
+                    if mirror_log and not mirror_log.closed:
+                        mirror_log.flush()
+                    with open(UXPLAY_LOG) as f:
+                        mirror_err = [ln.rstrip() for ln in f if ln.strip()][-6:]
+                except Exception:
+                    mirror_err = []
+            draw_mirror_screen(stdscr, uxplay_ok, mirror_err)
             draw_log_panel(stdscr)
 
         elif current_view == "CLEAR":
