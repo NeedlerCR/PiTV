@@ -16,7 +16,11 @@ const { execFile } = require('child_process');
 
 const PLUGIN_NAME   = 'homebridge-pitv-tv';
 const PLATFORM_NAME = 'PiTVTelevision';
-const CEC_CMD       = '/opt/pitv/cec-cmd.sh';
+// We send power commands to tv_menu.py's FIFO rather than calling cec-cmd.sh
+// directly: tv_menu.py owns the CEC bus and runs the command itself, so this
+// works no matter which user Homebridge runs as. The write is timeout-guarded
+// so Homebridge never hangs if tv_menu isn't running.
+const FIFO = '/tmp/tv_menu.fifo';
 
 let Service, Characteristic, Categories;
 
@@ -70,11 +74,12 @@ class PiTVTelevisionPlatform {
       .onGet(() => this.active)
       .onSet((value) => {
         this.active = value;
-        const arg = value ? 'on 0' : 'standby 0';
-        this.log.info(`HomeKit -> TV ${value ? 'ON' : 'OFF'} (cec-cmd.sh '${arg}')`);
-        execFile(CEC_CMD, [arg], (err) => {
-          if (err) this.log.error(`cec-cmd.sh failed: ${err.message}`);
-        });
+        const token = value ? 'TV_ON' : 'TV_OFF';
+        this.log.info(`HomeKit -> TV ${value ? 'ON' : 'OFF'} (${token} -> ${FIFO})`);
+        execFile('timeout', ['3', 'sh', '-c', `printf '%s\\n' '${token}' > ${FIFO}`],
+          (err) => {
+            if (err) this.log.error(`Writing ${token} to ${FIFO} failed: ${err.message}`);
+          });
       });
 
     // HomeKit wants a TV to expose at least one input source.

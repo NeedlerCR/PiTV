@@ -436,6 +436,20 @@ def listen_fifo():
                         _controller_scan_event.set()
                         continue
 
+                    # HomeKit (homebridge-pitv-tv) power control. Routed through
+                    # here — not called by Homebridge directly — because this
+                    # process owns the CEC bus, so cec-cmd.sh can free and reuse
+                    # it regardless of which user Homebridge runs as.
+                    if cmd in ("TV_ON", "TV_OFF"):
+                        arg = "on 0" if cmd == "TV_ON" else "standby 0"
+                        log(f"HomeKit CEC: {cmd}")
+                        threading.Thread(
+                            target=subprocess.run,
+                            args=(["/opt/pitv/cec-cmd.sh", arg],),
+                            daemon=True,
+                        ).start()
+                        continue
+
                     log(f"FIFO: {raw[:60]}")
 
                     if cmd in ("UP","DOWN","LEFT","RIGHT","SELECT","BACK","CLEAR","HOME"):
