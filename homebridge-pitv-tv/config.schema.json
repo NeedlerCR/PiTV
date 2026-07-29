@@ -1,0 +1,18 @@
+{
+  "pluginAlias": "PiTVTelevision",
+  "pluginType": "platform",
+  "singular": true,
+  "headerDisplay": "Exposes the Pi's HDMI-CEC TV to HomeKit as a Television accessory (power on/off). Published as an external accessory so it appears as a TV tile, not inside the bridge.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "TV Name",
+        "type": "string",
+        "default": "TV",
+        "required": true,
+        "description": "The name shown on the TV tile in the Home app."
+      }
+    }
+  }
+}

@@ -18,7 +18,6 @@ declare -A SECRETS=(
     ["BOMBERMAN"]="KVKFKRCPNZQUYFY4"
     ["BREAKOUT"]="N5XCAZDGNZTGS3TN"
     ["VS TETRIS"]="NBQXG5DFMFZGKZLB"
-    ["MONOPOLY"]="NRXWO2LOMNXW2ZLU"
 )
 
 declare -A KEYS=(
@@ -28,7 +27,6 @@ declare -A KEYS=(
     ["BOMBERMAN"]="BOMBERMAN"
     ["BREAKOUT"]="BREAKOUT"
     ["VS TETRIS"]="TETRISDUEL"
-    ["MONOPOLY"]="MONOPOLY"
 )
 
 echo ""
@@ -41,7 +39,7 @@ echo "=================================================================="
 echo ""
 
 for game in "SPACE INVADERS" "PAC-MAN" "SPACE SHOOTER" \
-            "BOMBERMAN" "BREAKOUT" "VS TETRIS" "MONOPOLY"; do
+            "BOMBERMAN" "BREAKOUT" "VS TETRIS"; do
     secret="${SECRETS[$game]}"
     key="${KEYS[$game]}"
     label="PiTV:${key}"

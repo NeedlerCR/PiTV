@@ -14,6 +14,11 @@ sudo mkdir -p /opt/pitv
 sudo cp -f *.sh *.py *.service /opt/pitv/ 2>/dev/null || true
 sudo cp -f .gitignore /opt/pitv/ 2>/dev/null || true
 
+# Copy the Homebridge TV plugin folder (installed separately via npm — see CLAUDE.md)
+if [ -d homebridge-pitv-tv ]; then
+    sudo cp -rf homebridge-pitv-tv /opt/pitv/
+fi
+
 # Reload systemd services
 echo "Reloading systemd service..."
 sudo cp pitv-menu.service /etc/systemd/system/

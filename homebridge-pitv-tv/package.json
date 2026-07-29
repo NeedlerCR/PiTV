@@ -1,0 +1,18 @@
+{
+  "name": "homebridge-pitv-tv",
+  "version": "1.0.0",
+  "description": "Exposes the Pi's HDMI-CEC TV to HomeKit as a Television accessory (power on/off) — published as an external accessory so it appears as a TV tile, not inside the bridge.",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18.0.0",
+    "homebridge": ">=1.6.0"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "homekit",
+    "television",
+    "cec",
+    "pitv"
+  ],
+  "license": "MIT"
+}

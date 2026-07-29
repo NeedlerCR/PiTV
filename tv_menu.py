@@ -159,7 +159,6 @@ GAME_KEYS = {
     "BREAKOUT":   ["lbreakout2"],
     "SHOOTER":    ["chromium-bsu"],
     "TETRISDUEL": ["vitetris"],         # 2-player versus Tetris (vitetris pkg)
-    "MONOPOLY":   ["monop"],            # 2-4 player Monopoly (bsdgames pkg)
     "TICTACTOE":  ["nettoe"],           # 1-2 player Tic-Tac-Toe (nettoe pkg)
 }
 
@@ -173,7 +172,6 @@ GAME_OPTIONS = [
     ("BREAKOUT",       ["lbreakout2"],      "BREAKOUT",   False),
     ("SPACE SHOOTER",  ["chromium-bsu"],    "SHOOTER",    False),
     ("VS TETRIS",      ["vitetris"],        "TETRISDUEL", True),
-    ("MONOPOLY",       ["monop"],           "MONOPOLY",   True),
     ("TIC-TAC-TOE",    ["nettoe"],          "TICTACTOE",  True),
 ]
 
@@ -251,6 +249,8 @@ def _handle_controller_event(event) -> None:
             elif c in (ecodes.BTN_THUMBL, ecodes.BTN_THUMBR):
                 if mode == "KEYPAD":
                     input_queue.append("SELECT")
+            elif c in (ecodes.BTN_TR, ecodes.BTN_TR2) and mode == "GAME_INTERNAL":
+                input_queue.append("SPEED")   # R button: snake speeds up
             return
 
         # ── MENU navigation ──
@@ -593,7 +593,6 @@ def run_game(stdscr, cmd_list: list):
             "lbreakout2":     "lbreakout2",
             "chromium-bsu":   "chromium-bsu",
             "vitetris":       "vitetris",
-            "monop":          "bsdgames",
             "nettoe":         "nettoe",
         }.get(binary, binary)
         msg = [
@@ -621,15 +620,21 @@ def run_game(stdscr, cmd_list: list):
     SDL_GAMES = {"chromium-bsu", "lbreakout2"}
     is_sdl    = binary in SDL_GAMES
 
-    # Controller-to-keys mapper for ncurses games
+    # Controller-to-keys mapper. SDL games on the console also read the
+    # keyboard via evdev and their native controller support is unreliable,
+    # so we run the mapper for EVERY game. Its output goes to a log (not
+    # DEVNULL) so a /dev/uinput permission error — the usual reason controls
+    # don't work — is visible instead of silently swallowed.
     mapper_proc = None
-    if EVDEV_OK and not is_sdl:
+    mapper_log  = None
+    if EVDEV_OK:
         mapper = "/opt/pitv/controller-to-keys.py"
         if os.path.exists(mapper):
             try:
+                mapper_log  = open("/tmp/pitv-mapper.log", "w")
                 mapper_proc = subprocess.Popen(
                     ["python3", mapper],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    stdout=mapper_log, stderr=subprocess.STDOUT,
                 )
             except Exception as e:
                 log(f"Mapper start failed: {e}")
@@ -642,9 +647,13 @@ def run_game(stdscr, cmd_list: list):
     # While the game runs the controller listener must stop injecting menu
     # commands — the mapper delivers movement as real key events instead.
     controller_mode = "GAME_EXTERNAL"
+    game_log = None
     try:
         try:
-            proc = subprocess.Popen(cmd_list, env=env)
+            # Capture the game's stderr so a crash-on-launch (e.g. a game that
+            # bails on this terminal) leaves a diagnosable trace in the log.
+            game_log = open("/tmp/pitv-game.log", "w")
+            proc = subprocess.Popen(cmd_list, env=env, stderr=game_log)
         except Exception as e:
             log(f"ERROR launching {binary}: {e}")
             _reset_terminal()
@@ -672,6 +681,10 @@ def run_game(stdscr, cmd_list: list):
             mapper_proc.terminate()
     finally:
         controller_mode = "MENU"
+        for f in (mapper_log, game_log):
+            if f:
+                try: f.close()
+                except Exception: pass
 
     log(f"Game stop: {binary}")
     curses.reset_prog_mode(); curses.curs_set(0)
@@ -697,37 +710,63 @@ def run_snake(stdscr):
 
     DIRS   = {"UP": (0, -1), "DOWN": (0, 1), "LEFT": (-1, 0), "RIGHT": (1, 0)}
     quit_game = False
-    score     = 0
+    apples    = 0            # food eaten
+    speed_lvl = 0            # raised by the R button; never lowered
+    final     = 0            # apples × speed bonus, computed at game over
+
+    # Each logical cell is drawn 2 columns wide so the snake looks big and
+    # chunky on a TV; blocks are solid (a reverse-video space in colour).
+    CELL_W = 2
+
+    # Speed model.  Seconds per step: starts gentle, and both the R button
+    # (speed_lvl) and natural growth (apples) make it faster.  There is no
+    # control that slows it back down.
+    BASE_TICK   = 0.20
+    MIN_TICK    = 0.06
+    SPEED_STEP  = 0.020     # per R-button level
+    GROW_STEP   = 0.003     # per apple
+    MAX_SPEED   = 6         # R-button level cap
+
+    def tick_for():
+        return max(MIN_TICK, BASE_TICK - speed_lvl * SPEED_STEP - apples * GROW_STEP)
+
+    def multiplier():
+        # Small end-of-game bonus that grows with how fast you dared to go.
+        return 1.0 + 0.15 * speed_lvl
 
     try:
         max_y, max_x = stdscr.getmaxyx()
         top, left    = 1, 1
         bottom       = max_y - 2          # leave a row for the status bar
         right        = max_x - 2
-        if (right - left) < 12 or (bottom - top) < 6:
+        gw           = (right - left + 1) // CELL_W   # logical columns
+        gh           = bottom - top + 1               # logical rows
+        if gw < 8 or gh < 6:
             show_message(stdscr, ["SCREEN TOO SMALL FOR SNAKE"],
                          color_pair=1, duration=2.0)
             return
 
-        cx, cy      = left + (right - left) // 2, top + (bottom - top) // 2
+        cx, cy      = gw // 2, gh // 2
         snake       = [(cx - 2, cy), (cx - 1, cy), (cx, cy)]   # tail … head
         direction   = (1, 0)                                   # committed heading
         pending_dir = direction                                # next turn to apply
 
         def place_food():
             while True:
-                fx = random.randint(left, right)
-                fy = random.randint(top, bottom)
+                fx = random.randint(0, gw - 1)
+                fy = random.randint(0, gh - 1)
                 if (fx, fy) not in snake:
                     return (fx, fy)
 
-        food = place_food()
-
-        # Seconds per step.  Deliberately gentle for a TV; eases up as you grow.
-        BASE_TICK = 0.18
-        MIN_TICK  = 0.09
-        tick      = BASE_TICK
+        food      = place_food()
         last_step = time.time()
+
+        BODY = curses.color_pair(2) | curses.A_REVERSE
+        HEAD = curses.color_pair(2) | curses.A_REVERSE | curses.A_BOLD
+        FOOD = curses.color_pair(1) | curses.A_REVERSE
+
+        def draw_cell(lx, ly, attr):
+            stdscr.addstr(top + ly, left + lx * CELL_W, " " * CELL_W, attr)
 
         while True:
             # ── Keyboard (fed into the same queue as controller/CEC) ──
@@ -738,19 +777,23 @@ def run_snake(stdscr):
                     elif ch == curses.KEY_DOWN:  input_queue.append("DOWN")
                     elif ch == curses.KEY_LEFT:  input_queue.append("LEFT")
                     elif ch == curses.KEY_RIGHT: input_queue.append("RIGHT")
+                    elif ch in (ord("r"), ord("R"), ord("+")):
+                        input_queue.append("SPEED")
                     elif ch in (27, ord("q")):   input_queue.append("BACK")
             except curses.error:
                 pass
 
-            # ── Drain queued directions. Validate every turn against the
-            # committed heading (not against each other) so chaining several
-            # inputs inside one tick can never fold the snake back on itself. ──
+            # ── Drain queued input. Validate every turn against the committed
+            # heading (not against each other) so chaining several inputs
+            # inside one tick can never fold the snake back on itself. ──
             while input_queue:
                 cmd = input_queue.pop(0)
                 if cmd in ("BACK", "HOME"):
                     quit_game = True
                     break
-                if cmd in DIRS:
+                if cmd == "SPEED":
+                    speed_lvl = min(MAX_SPEED, speed_lvl + 1)   # only speeds up
+                elif cmd in DIRS:
                     d = DIRS[cmd]
                     if d[0] != -direction[0] or d[1] != -direction[1]:  # no U-turn
                         pending_dir = d
@@ -759,19 +802,18 @@ def run_snake(stdscr):
 
             # ── Advance on the tick (commit exactly one turn per step) ──
             now = time.time()
-            if now - last_step >= tick:
+            if now - last_step >= tick_for():
                 last_step = now
                 direction = pending_dir
                 hx, hy = snake[-1]
                 nx, ny = hx + direction[0], hy + direction[1]
-                if (nx < left or nx > right or ny < top or ny > bottom
+                if (nx < 0 or nx >= gw or ny < 0 or ny >= gh
                         or (nx, ny) in snake):
                     break                                   # crash → game over
                 snake.append((nx, ny))
                 if (nx, ny) == food:
-                    score += 1
-                    food  = place_food()
-                    tick  = max(MIN_TICK, BASE_TICK - score * 0.004)
+                    apples += 1
+                    food    = place_food()
                 else:
                     snake.pop(0)
 
@@ -781,15 +823,14 @@ def run_snake(stdscr):
                 stdscr.attron(curses.color_pair(2))
                 stdscr.border()
                 stdscr.attroff(curses.color_pair(2))
-                stdscr.addch(food[1], food[0], "@",
-                             curses.color_pair(1) | curses.A_BOLD)
+                draw_cell(food[0], food[1], FOOD)
                 for i, (sx, sy) in enumerate(snake):
-                    glyph = "O" if i == len(snake) - 1 else "o"
-                    stdscr.addch(sy, sx, glyph,
-                                 curses.color_pair(2) | curses.A_BOLD)
+                    draw_cell(sx, sy, HEAD if i == len(snake) - 1 else BODY)
             except curses.error:
                 pass
-            status = f" SNAKE   Score: {score}   D-pad/Stick to steer   B/BACK to quit "
+            live = int(round(apples * multiplier()))
+            status = (f" SNAKE   Score: {live}   Speed: {speed_lvl}/{MAX_SPEED}"
+                      f" (x{multiplier():.2f})   R: faster   B/BACK: quit ")
             try:
                 stdscr.addstr(max_y - 1, 0, status.center(max_x - 1),
                               curses.A_REVERSE | curses.A_DIM)
@@ -798,16 +839,19 @@ def run_snake(stdscr):
             stdscr.refresh()
             time.sleep(0.01)
 
+        final = int(round(apples * multiplier()))
         if not quit_game:
             show_message(stdscr,
-                         ["GAME OVER", "", f"Score: {score}", "",
+                         ["GAME OVER", "",
+                          f"Apples: {apples}   Speed bonus: x{multiplier():.2f}",
+                          f"Score: {final}", "",
                           "Returning to menu…"],
-                         color_pair=1, duration=2.5)
+                         color_pair=1, duration=3.0)
     finally:
         controller_mode = "MENU"
         input_queue.clear()
         stdscr.clear()
-        log(f"Snake: stop (score {score})")
+        log(f"Snake: stop (apples {apples}, speed {speed_lvl}, score {final})")
 
 
 def run_mirror(stdscr):
@@ -823,34 +867,34 @@ def run_mirror(stdscr):
     display mode even though fbcon still owns the console.
     """
     UXPLAY_LOG = "/tmp/uxplay.log"
-    log("Mirror: starting uxplay (kmssink force-modesetting + software decode)")
+
+    # A phone mirrors in portrait; filling a 16:9 TV stretches it. Render the
+    # stream into a centred, phone-shaped rectangle (black bars at the sides)
+    # by giving kmssink a render-rectangle sized from the real display.
+    def _screen_size():
+        try:
+            with open("/sys/class/graphics/fb0/virtual_size") as f:
+                w, h = (int(v) for v in f.read().strip().split(","))
+                if w > 0 and h > 0:
+                    return w, h
+        except Exception:
+            pass
+        return 1920, 1080
+
+    sw, sh = _screen_size()
+    pw = max(120, int(sh * 9 / 19.5))          # iPhone-ish portrait width
+    px = max(0, (sw - pw) // 2)                 # centre it horizontally
+    portrait_sink   = (f'kmssink force-modesetting=true '
+                       f'render-rectangle=<{px},0,{pw},{sh}>')
+    fullscreen_sink = "kmssink force-modesetting=true"
+    log(f"Mirror: display {sw}x{sh}; portrait rect <{px},0,{pw},{sh}>")
 
     curses.def_prog_mode()
     curses.endwin()
     _reset_terminal()
     os.system("clear")
-    print("AirPlay receiver 'PiTV' is ready.\n"
-          "  iPhone/iPad/Mac: Control Centre -> Screen Mirroring -> PiTV\n"
-          "  (phone and Pi must share the same Wi-Fi network)\n"
-          "Press BACK / B / HOME to stop.\n", flush=True)
 
-    try:
-        logf = open(UXPLAY_LOG, "w")
-    except Exception:
-        logf = subprocess.DEVNULL
-
-    try:
-        proc = subprocess.Popen(
-            ["uxplay", "-n", "PiTV",
-             "-vs", "kmssink force-modesetting=true",   # one argv token = quoted sink
-             "-avdec"],
-            stdout=logf, stderr=subprocess.STDOUT,
-        )
-    except FileNotFoundError:
-        log("ERROR: uxplay not found")
-        if logf not in (None, subprocess.DEVNULL):
-            try: logf.close()
-            except Exception: pass
+    if not resolve_binary("uxplay"):
         print("\nuxplay is not installed. Install it with:\n"
               "  sudo apt install uxplay gstreamer1.0-plugins-bad \\\n"
               "      gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly\n"
@@ -860,20 +904,54 @@ def run_mirror(stdscr):
         curses.reset_prog_mode(); curses.curs_set(0)
         return
 
-    # Monitor for exit (BACK/HOME from FIFO/CEC/controller) or an early crash.
-    died = False
-    while True:
-        while input_queue:
-            c = input_queue.pop(0)
-            if c in ("BACK", "HOME"):
-                proc.terminate()
-                break
-        if proc.poll() is not None:
-            died = (proc.returncode not in (0, -15))   # -15 = SIGTERM (our stop)
-            break
-        time.sleep(0.1)
+    print("AirPlay receiver 'PiTV' is ready.\n"
+          "  iPhone/iPad/Mac: Control Centre -> Screen Mirroring -> PiTV\n"
+          "  (phone and Pi must share the same Wi-Fi network)\n"
+          "The phone appears centred at its own shape; the sides stay black.\n"
+          "Press BACK / B / HOME to stop.\n", flush=True)
 
-    if proc.poll() is None:
+    try:
+        logf = open(UXPLAY_LOG, "w")
+    except Exception:
+        logf = subprocess.DEVNULL
+
+    def _launch(sink):
+        return subprocess.Popen(
+            ["uxplay", "-n", "PiTV", "-vs", sink, "-avdec"],
+            stdout=logf, stderr=subprocess.STDOUT,
+        )
+
+    # Try the portrait sink first; if it dies quickly (bad render-rectangle on
+    # this GStreamer build), fall back to the known-good fullscreen sink so the
+    # mirror still works rather than leaving a black screen.
+    stopped_by_user = False
+    crashed         = False
+    proc            = None
+    for idx, sink in enumerate([portrait_sink, fullscreen_sink]):
+        started = time.time()
+        proc    = _launch(sink)
+        while True:
+            while input_queue:
+                c = input_queue.pop(0)
+                if c in ("BACK", "HOME"):
+                    stopped_by_user = True
+                    proc.terminate()
+                    break
+            if stopped_by_user or proc.poll() is not None:
+                break
+            time.sleep(0.1)
+
+        if stopped_by_user:
+            break
+        # uxplay exited on its own.
+        quick = (time.time() - started) < 6
+        if idx == 0 and quick:
+            log("Mirror: portrait sink failed fast — retrying fullscreen")
+            continue
+        crashed = (proc.returncode not in (0, -15))   # -15 = our SIGTERM
+        break
+
+    if proc is not None and proc.poll() is None:
         proc.terminate()
         try: proc.wait(timeout=2)
         except subprocess.TimeoutExpired: proc.kill()
@@ -882,9 +960,7 @@ def run_mirror(stdscr):
         try: logf.close()
         except Exception: pass
 
-    if died:
-        # uxplay exited on its own — show why (usually a kmssink/DRM or mDNS
-        # error) so the failure is visible instead of a silent black screen.
+    if crashed:
         log("uxplay exited unexpectedly — see /tmp/uxplay.log")
         try:
             with open(UXPLAY_LOG) as f:
