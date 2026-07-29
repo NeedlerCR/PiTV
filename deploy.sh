@@ -4,12 +4,15 @@ set -e
 
 echo "Deploying Pi TV updates..."
 
-# Make sure permissions are correct for all scripts
+# Make sure all scripts are executable
 chmod +x *.sh *.py 2>/dev/null || true
 
-# Sync ALL files (.sh, .py, .service, .gitignore, etc.) into /opt/pitv/
+# Ensure destination directory exists
 sudo mkdir -p /opt/pitv
-sudo cp -rf . /opt/pitv/
+
+# Safely copy scripts, configs, and service files (skipping hidden folders like .git)
+sudo cp -f *.sh *.py *.service /opt/pitv/ 2>/dev/null || true
+sudo cp -f .gitignore /opt/pitv/ 2>/dev/null || true
 
 # Reload systemd services
 echo "Reloading systemd service..."
