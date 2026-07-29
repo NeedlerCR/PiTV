@@ -1,34 +1,20 @@
 #!/bin/bash
-
-# Exit immediately if any command fails
+# Exit on any error
 set -e
 
-echo "🚀 Deploying updates from /home/charlieneedler to system locations..."
+echo "Deploying Pi TV updates..."
 
-# 1. Ensure target directory /opt/pitv exists
+# Make sure permissions are correct
+chmod +x *.sh *.py
+
+# Sync scripts into /opt/pitv/ (creates directory if missing)
 sudo mkdir -p /opt/pitv
+sudo cp -f *.sh *.py /opt/pitv/ 2>/dev/null || true
 
-# 2. Copy scripts to /opt/pitv/ and set executable permissions
-echo "📦 Deploying python and shell scripts to /opt/pitv/..."
-sudo cp cec-cmd.sh controller-to-keys.py otp-setup.sh remote.py tv_menu.py tv-state.sh /opt/pitv/ 2>/dev/null || true
-sudo chmod +x /opt/pitv/*.sh /opt/pitv/*.py 2>/dev/null || true
-
-# 3. Deploy screen script to /usr/local/bin/ (if present)
-if [ -f "screen" ]; then
-    echo "📦 Deploying screen script to /usr/local/bin/..."
-    sudo cp screen /usr/local/bin/screen
-    sudo chmod +x /usr/local/bin/screen
-fi
-
-# 4. Deploy systemd service file (if present)
-if [ -f "pitv-menu.service" ]; then
-    echo "⚙️ Updating pitv-menu.service in /etc/systemd/system/..."
-    sudo cp pitv-menu.service /etc/systemd/system/pitv-menu.service
-fi
-
-# 5. Reload systemd daemon and restart the service
-echo "🔄 Reloading systemd daemon and restarting pitv-menu..."
+# Reload systemd services
+echo "Reloading systemd service..."
+sudo cp pitv-menu.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl restart pitv-menu
+sudo systemctl restart pitv-menu.service
 
-echo "✅ Deployment complete! System updated."
+echo "Deploy complete!"

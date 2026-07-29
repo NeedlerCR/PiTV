@@ -33,7 +33,7 @@ except ImportError:
 LOG_PATH          = "/tmp/pitv.log"
 LOG_BUFFER: list  = []
 LOG_MAX           = 200
-log_visible       = False          # toggled by pressing W then 3
+log_visible       = False          # toggled by pressing Shift+F then 6
 LOG_PANEL_LINES   = 3
 
 
@@ -166,6 +166,32 @@ GAME_OPTIONS = [
     ("BATTLESHIP [2P]",["bs"],             "BATTLESHIP", True),
 ]
 
+# Debian's bsdgames/bastet/etc packages install into /usr/games, but the
+# systemd service's default PATH (/usr/local/bin:/usr/bin:/bin) doesn't
+# include it — shutil.which() alone will report every game as missing.
+# Search these directories explicitly and cache the resolved absolute path.
+_GAME_SEARCH_DIRS = [
+    "/usr/games", "/usr/local/games",
+    "/usr/bin", "/usr/local/bin", "/bin",
+]
+_binary_path_cache: dict = {}
+
+
+def resolve_binary(name: str) -> str | None:
+    """Return the absolute path to `name`, checking /usr/games etc, or None."""
+    if name in _binary_path_cache:
+        return _binary_path_cache[name]
+    # PATH-based lookup first (fast path if PATH happens to be set right)
+    found = shutil.which(name)
+    if not found:
+        for d in _GAME_SEARCH_DIRS:
+            candidate = os.path.join(d, name)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                found = candidate
+                break
+    _binary_path_cache[name] = found
+    return found
+
 ART_OPTIONS = [
     ("FIRE",          "FIRE",   "FIRE"),
     ("CLOCK + STARS", None,     "CLOCK"),
@@ -235,8 +261,9 @@ def _handle_controller_event(event) -> None:
 
 def listen_controllers() -> None:
     """
-    Scans for gamepads; retries every 5 minutes if none found,
-    or immediately when triggered by 'screen controller' / SCAN_CONTROLLER.
+    Scans for gamepads on startup, or whenever triggered by
+    'screen controller' / SCAN_CONTROLLER (crontab handles periodic
+    retriggering — this listener itself does not auto-retry).
     Rescans only when a monitored device actually disappears.
     IMU/audio/HDMI devices are excluded.
     """
@@ -277,7 +304,7 @@ def listen_controllers() -> None:
                 pass
         return found
 
-    log("Controller listener ready (5-minute background scan)")
+    log("Controller listener ready")
 
     while True:
         _controller_scan_event.wait()
@@ -292,9 +319,7 @@ def listen_controllers() -> None:
                 time.sleep(3)
 
         if not gamepads:
-            log("No controller found — retrying in 5 min (or 'screen controller')")
-            _controller_scan_event.wait(timeout=300)   # 5 minutes or manual trigger
-            _controller_scan_event.set()
+            log("No controller found — waiting for next 'screen controller' trigger")
             continue
 
         log(f"Monitoring {len(gamepads)} controller(s)")
@@ -502,8 +527,9 @@ def run_game(stdscr, cmd_list: list):
     """
     binary = cmd_list[0]
 
-    # ── Pre-flight: is the binary installed? ──────────────────────────
-    if not shutil.which(binary):
+    # ── Pre-flight: is the binary installed? (checks /usr/games too) ──
+    resolved = resolve_binary(binary)
+    if not resolved:
         pkg_hint = {
             "snake":          "bsdgames",
             "bastet":         "bastet",
@@ -519,7 +545,7 @@ def run_game(stdscr, cmd_list: list):
         msg = [
             "GAME NOT INSTALLED",
             "",
-            f"'{binary}' was not found on this system.",
+            f"'{binary}' was not found (checked /usr/games, /usr/bin, etc).",
             "",
             f"Install:  sudo apt install -y {pkg_hint}",
             "",
@@ -529,7 +555,10 @@ def run_game(stdscr, cmd_list: list):
         show_message(stdscr, msg, color_pair=1, duration=4.0)
         return
 
-    log(f"Game start: {binary}")
+    # Replace the bare name with its resolved absolute path for Popen
+    cmd_list = [resolved] + cmd_list[1:]
+
+    log(f"Game start: {binary} -> {resolved}")
     curses.def_prog_mode()
     curses.endwin()
     _reset_terminal()
@@ -796,7 +825,7 @@ def draw_main_menu(stdscr, sel):
     _draw_card_list(
         stdscr, [label for label,_,_ in ART_OPTIONS], sel,
         title    = "PI DISPLAY CONTROLLER",
-        subtitle = "  Remote/Controller: navigate    SSH: screen remote on    Log: W then 3",
+        subtitle = "  Remote/Controller: navigate    SSH: screen remote on    Log: Shift+F, 6",
         color    = curses.color_pair(2),
     )
 
@@ -805,7 +834,7 @@ def draw_games_menu(stdscr, sel):
     def badge(key, is2p):
         tags = (["FREE"] if key in FREE_GAMES else ["LOCK"])
         if is2p: tags.append("2P")
-        if not shutil.which(GAME_KEYS.get(key, [key])[0]): tags.append("N/A")
+        if not resolve_binary(GAME_KEYS.get(key, [key])[0]): tags.append("N/A")
         return "  [" + "/".join(tags) + "]"
 
     labels = [label + badge(key, is2p) for label,_,key,is2p in GAME_OPTIONS]
@@ -967,11 +996,13 @@ def main(stdscr):
             should_clear_screen = True
 
             if current_view == "MIRROR_ACTIVE":
-                log("Starting uxplay")
+                log("Starting uxplay (kmssink + software decode)")
                 try:
-                    # Try without forcing a sink — let GStreamer auto-detect
+                    # Pi OS Lite has no X11 — kmssink is required for framebuffer
+                    # output, and -avdec forces software decoding since VAAPI
+                    # hardware decode isn't configured on this system.
                     mirror_proc = subprocess.Popen(
-                        ["uxplay", "-n", "PiTV", "-avdec"],
+                        ["uxplay", "-n", "PiTV", "-vs", "kmssink", "-avdec"],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     )
                     uxplay_ok = True
@@ -1003,10 +1034,10 @@ def main(stdscr):
             ch = stdscr.getch()
             now = time.time()
             if ch > 0:
-                # Log toggle: press W then 3 within 1 second
-                if ch == ord("W"):
-                    last_key_char = "W"; last_key_time = now
-                elif ch == ord("3") and last_key_char == "W" and (now-last_key_time) < 1.0:
+                # Log toggle: press Shift+F (capital F) then 6, within 1 second
+                if ch == ord("F"):
+                    last_key_char = "F"; last_key_time = now
+                elif ch == ord("6") and last_key_char == "F" and (now-last_key_time) < 1.0:
                     log_visible = not log_visible
                     log(f"Log {'shown' if log_visible else 'hidden'}")
                     last_key_char = ""
