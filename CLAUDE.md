@@ -61,9 +61,13 @@ Needs `uxplay` + gstreamer plugins + `avahi-daemon` (mDNS).
 `homebridge-pitv-tv/` is a local Homebridge platform plugin that publishes a
 **Television** accessory as an **external accessory**
 (`publishExternalAccessories`) so it appears as a TV tile in the Home app —
-*not* inside the bridge. Power on/off calls `/opt/pitv/cec-cmd.sh`
-(`on 0` / `standby 0`). See the plugin README/comments and the setup steps in
-chat. (`tv-state.sh` was the older homebridge-cmd4 approach and is superseded.)
+*not* inside the bridge. Power on/off is sent as `TV_ON` / `TV_OFF` to the
+FIFO; `tv_menu.py` (which owns the CEC bus) runs `/opt/pitv/cec-cmd.sh`
+(`on 0` / `standby 0`). Because the official Homebridge service is sandboxed
+(`ProtectSystem=strict`, so `/tmp` is read-only for it), run
+**`./setup-homekit.sh`** once — it drops in `ReadWritePaths=/tmp` so Homebridge
+can reach the FIFO. (`tv-state.sh` was the older homebridge-cmd4 approach and
+is superseded.)
 
 ## Secrets — never commit
 

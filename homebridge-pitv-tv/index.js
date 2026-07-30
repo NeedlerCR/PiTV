@@ -82,11 +82,15 @@ class PiTVTelevisionPlatform {
           });
       });
 
-    // HomeKit wants a TV to expose at least one input source.
+    // HomeKit wants a TV to expose at least one input source. Define it fully
+    // (Name + ConfiguredName + both visibility states) so the Home app lists
+    // it on the "choose your inputs" screen during setup instead of finding
+    // none.
     tvService.setCharacteristic(Characteristic.ActiveIdentifier, 1);
     const input = tv.addService(Service.InputSource, 'hdmi', 'HDMI');
     input
       .setCharacteristic(Characteristic.Identifier, 1)
+      .setCharacteristic(Characteristic.Name, 'HDMI')
       .setCharacteristic(Characteristic.ConfiguredName, 'HDMI')
       .setCharacteristic(
         Characteristic.IsConfigured,
@@ -99,6 +103,10 @@ class PiTVTelevisionPlatform {
       .setCharacteristic(
         Characteristic.CurrentVisibilityState,
         Characteristic.CurrentVisibilityState.SHOWN,
+      )
+      .setCharacteristic(
+        Characteristic.TargetVisibilityState,
+        Characteristic.TargetVisibilityState.SHOWN,
       );
     tvService.addLinkedService(input);
 
