@@ -45,8 +45,11 @@ the TV's power to Apple HomeKit over HDMI-CEC.
 Defined in `GAME_KEYS` / `GAME_OPTIONS` in `tv_menu.py`. `resolve_binary()`
 also searches `/usr/games` (systemd's PATH omits it). SDL games
 (`chromium-bsu`, `lbreakout2`) get `SDL_VIDEODRIVER=kmsdrm`. `FREE_GAMES`
-skip the OTP keypad; everything else needs a TOTP code (or the emergency
-code). Snake is built-in (R button speeds it up; end score gets a speed
+skip the PIN keypad; everything else needs a personal PIN (or the emergency
+code). PINs are per-person in `~/.pitv/pins.json`, managed by
+`screen pin assign|list|remove|rename` (`pin-admin.py`), and every unlock is
+logged with the person's name so you can see who played. Snake is built-in
+(R button speeds it up; end score gets a speed
 multiplier). Snake and Noughts & Crosses are built-in curses games
 (`run_snake`, `run_noughts`) that read `input_queue`, so the controller, CEC
 and the Apple remote all drive them. Tetris is `vitetris` (its own menu has
@@ -79,10 +82,10 @@ always send a localhost packet. `tv_menu.py` owns the CEC bus and runs
 
 ## Secrets — never commit
 
-The Homebridge PIN, the game TOTP secret, and the emergency bypass code are
-**device-only**. Keep them out of git. If any leaks into the repo, rotate it.
-Config files that contain them (e.g. `~/.homebridge/config.json`) live on the
-Pi, not here.
+The Homebridge PIN, the player PINs (`~/.pitv/pins.json`), and the emergency
+bypass code are **device-only**. Keep them out of git. If any leaks into the
+repo, rotate it. Config files that contain them (e.g. `~/.homebridge/config.json`)
+live on the Pi, not here.
 
 ## Branch / deploy workflow
 

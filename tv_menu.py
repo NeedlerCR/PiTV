@@ -1,4 +1,5 @@
 import curses
+import json
 import math
 import os
 import random
@@ -16,16 +17,10 @@ import time
 
 try:
     import evdev
-    from evdev import ecodes
+    from evdev import ecodes, UInput
     EVDEV_OK = True
 except ImportError:
     EVDEV_OK = False
-
-try:
-    import pyotp
-    PYOTP_OK = True
-except ImportError:
-    PYOTP_OK = False
 
 # ─────────────────────────────────────────────────────────────────────
 # LOG SYSTEM
@@ -59,27 +54,40 @@ def log_clear() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# OTP / LOCKOUT SYSTEM
+# PIN / LOCKOUT SYSTEM
 # ─────────────────────────────────────────────────────────────────────
+#
+# Locked games are opened with a personal PIN. PINs are managed from the CLI
+# (`screen pin assign|list|remove|rename|revoke`) and stored per-person in
+# PIN_FILE, so the log records WHO opened each game. The emergency code is a
+# master that always works.
 
 EMERGENCY_CODE  = "159753"
 FREE_GAMES      = {"SNAKE", "TETRIS", "TICTACTOE"}
-GAME_SECRET     = "JBSWY3DPEHPK3PXP"   # one entry in authenticator covers all locked games
 OTP_MAX_FAILS   = 3
+PIN_FILE        = os.path.expanduser("~/.pitv/pins.json")
 
 
-def verify_otp(game_key: str, code: str) -> bool:
+def load_pins() -> dict:
+    """{name: 6-digit PIN}, read fresh each time so `screen pin` edits apply
+    without restarting the menu."""
+    try:
+        with open(PIN_FILE) as f:
+            data = json.load(f)
+        return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def verify_pin(code: str):
+    """Return the player's name for a valid PIN, 'Emergency' for the master
+    code, or None. (Free games never reach here.)"""
     if code == EMERGENCY_CODE:
-        log(f"OTP: emergency code used for {game_key}")
-        return True
-    if game_key in FREE_GAMES:
-        return True
-    if not PYOTP_OK:
-        log("OTP: pyotp not installed — granting access")
-        return True
-    result = pyotp.TOTP(GAME_SECRET).verify(code, valid_window=1)
-    log(f"OTP: {'PASS' if result else 'FAIL'} for {game_key}")
-    return result
+        return "Emergency"
+    for name, pin in load_pins().items():
+        if code and code == pin:
+            return name
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -529,19 +537,62 @@ def _set_kill_switch(on):
         log("Kill switch OFF")
 
 
+_remote_ui       = None
+_remote_ui_tried = False
+
+
+def _remote_keymap():
+    return {
+        "UP":     ecodes.KEY_UP,    "DOWN":  ecodes.KEY_DOWN,
+        "LEFT":   ecodes.KEY_LEFT,  "RIGHT": ecodes.KEY_RIGHT,
+        "SELECT": ecodes.KEY_ENTER, "PLAY":  ecodes.KEY_SPACE,
+        "BACK":   ecodes.KEY_ESC,   "SPEED": ecodes.KEY_R,
+    }
+
+
+def _remote_inject(token):
+    """Inject a keystroke so the Apple remote can drive EXTERNAL games (which
+    read the console keyboard, not input_queue). Lazily opens a uinput device;
+    if that isn't permitted it silently no-ops (menu/built-in games still
+    work). SELECT=Enter (menu confirm), PLAY/PAUSE=Space (fire/start)."""
+    global _remote_ui, _remote_ui_tried
+    if not EVDEV_OK:
+        return
+    kc = _remote_keymap().get(token)
+    if kc is None:
+        return
+    if _remote_ui is None and not _remote_ui_tried:
+        _remote_ui_tried = True
+        try:
+            keys = sorted(set(_remote_keymap().values()))
+            _remote_ui = UInput({ecodes.EV_KEY: keys}, name="pitv-remote-kb")
+        except Exception as e:
+            log(f"Remote uinput unavailable: {e}")
+    if _remote_ui:
+        try:
+            _remote_ui.write(ecodes.EV_KEY, kc, 1); _remote_ui.syn()
+            time.sleep(0.03)
+            _remote_ui.write(ecodes.EV_KEY, kc, 0); _remote_ui.syn()
+        except Exception as e:
+            log(f"Remote inject error: {e}")
+
+
 def listen_cec_udp():
     """Control channel from homebridge-pitv-tv over localhost UDP.
 
     Homebridge is sandboxed and can't write our /tmp FIFO, but it can always
     send a localhost datagram. Accepted messages:
-      TV_ON / TV_OFF   -> CEC power on / standby (this process owns the bus)
-      CEC tx <frame>   -> raw CEC frame, e.g. input switching (whitelisted)
-      KEY <TOKEN>      -> menu navigation, so the Apple Home / Control Centre
-                          remote drives the menu (UP/DOWN/LEFT/RIGHT/SELECT/
-                          BACK/HOME)
+      TV_ON / TV_OFF     -> CEC power on / standby (this process owns the bus)
+      KILL_ON / KILL_OFF -> kill switch (keep the TV forced off)
+      CEC tx <frame>     -> raw CEC frame, e.g. input switching (whitelisted)
+      KEY <TOKEN>        -> Apple Home / Control Centre remote. In the menu and
+                            built-in games it feeds input_queue; during an
+                            external game it's injected as a real keystroke via
+                            uinput. Tokens: UP/DOWN/LEFT/RIGHT/SELECT/PLAY/BACK/
+                            HOME/SPEED.
     """
     import socket
-    NAV = {"UP", "DOWN", "LEFT", "RIGHT", "SELECT", "BACK", "HOME"}
+    MENU_NAV = {"UP", "DOWN", "LEFT", "RIGHT", "SELECT", "BACK", "SPEED"}
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -562,8 +613,14 @@ def listen_cec_udp():
                 _set_kill_switch(up == "KILL_ON")
             elif up.startswith("KEY "):
                 tok = up[4:].strip()
-                if tok in NAV:
-                    input_queue.append(tok)
+                if tok == "HOME":
+                    input_queue.append("HOME")            # quit game / to menu
+                elif controller_mode == "GAME_EXTERNAL":
+                    _remote_inject(tok)                   # real keys into the game
+                else:
+                    q = "SELECT" if tok in ("PLAY", "ENTER") else tok
+                    if q in MENU_NAV:
+                        input_queue.append(q)             # menu + built-in games
             elif msg.startswith("CEC "):
                 frame = msg[4:].strip()
                 if _CEC_TX_RE.match(frame):
@@ -1429,7 +1486,7 @@ def draw_keypad(stdscr, game_name, entered, error, is_lock=False):
     max_y, max_x = stdscr.getmaxyx()
     stdscr.erase()
 
-    title = "SYSTEM LOCKED — ENTER EMERGENCY CODE" if is_lock else f"ENTER CODE: {game_name}"
+    title = "SYSTEM LOCKED — ENTER A PIN" if is_lock else f"ENTER PIN: {game_name}"
     color = curses.color_pair(1) if is_lock else curses.color_pair(5)
     try:
         stdscr.addstr(1, max(0,(max_x-len(title))//2), title, color|curses.A_BOLD)
@@ -1606,13 +1663,14 @@ def main(stdscr):
                     key = KEYPAD_LAYOUT[keypad_row][keypad_col]
                     entered, verify = keypad_press(key, "LOCK")
                     if verify:
-                        if entered == EMERGENCY_CODE:
+                        who = verify_pin(entered)
+                        if who:
                             system_locked = False
                             otp_fail_count = 0
-                            log("System unlocked via emergency code")
+                            log(f"System unlocked by {who}")
                             current_view = "MENU"
                         else:
-                            lock_error   = "WRONG CODE"
+                            lock_error   = "WRONG PIN"
                             lock_entered = ""
                 # All other commands (HOME, CLEAR, etc.) are ignored while locked
                 continue
@@ -1732,19 +1790,21 @@ def main(stdscr):
                     key = KEYPAD_LAYOUT[keypad_row][keypad_col]
                     entered, verify = keypad_press(key, "GAME")
                     if verify:
-                        if verify_otp(pending_game_key, entered):
+                        who = verify_pin(entered)
+                        if who:
                             otp_fail_count = 0
+                            log(f"{pending_game_key} unlocked by {who}")
                             run_game(stdscr, pending_game_cmd)
                             current_view = "GAMES_MENU"
                         else:
                             otp_fail_count += 1
                             remaining = OTP_MAX_FAILS - otp_fail_count
                             if otp_fail_count >= OTP_MAX_FAILS:
-                                log("OTP max failures — system locked")
+                                log("Max failures — system locked")
                                 system_locked = True
                                 current_view  = "LOCKED"
                             else:
-                                keypad_error   = f"WRONG CODE — {remaining} attempt(s) left"
+                                keypad_error   = f"WRONG PIN — {remaining} attempt(s) left"
                                 keypad_entered = ""
 
             elif current_view in ("ART_RUNNING","CLEAR"):

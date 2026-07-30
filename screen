@@ -25,6 +25,12 @@ Other modes:
 Controller:
   screen controller        scan for Bluetooth controller (60 seconds)
 
+Player PINs (unlock locked games; the log records who played):
+  screen pin assign <name>       create/show a person's PIN
+  screen pin list                list everyone's PIN
+  screen pin remove <name>       delete a person's PIN
+  screen pin rename <old> <new>  rename a person
+
 SSH keyboard remote:
   screen remote on         interactive forwarder (ESC to exit)
   screen remote off        kill a background remote session
@@ -70,6 +76,11 @@ case "$CMD" in
 
     enter)
         _send "SELECT"
+        ;;
+
+    pin)
+        shift
+        exec python3 /opt/pitv/pin-admin.py "$@"
         ;;
 
     fire|clock|matrix)

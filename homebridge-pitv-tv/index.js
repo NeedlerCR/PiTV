@@ -153,11 +153,11 @@ class PiTVTelevisionPlatform {
       [RK.ARROW_DOWN]:  'DOWN',
       [RK.ARROW_LEFT]:  'LEFT',
       [RK.ARROW_RIGHT]: 'RIGHT',
-      [RK.SELECT]:      'SELECT',
-      [RK.PLAY_PAUSE]:  'SELECT',
+      [RK.SELECT]:      'SELECT',   // tap → Enter (menu/select)
+      [RK.PLAY_PAUSE]:  'PLAY',     // play/pause → Space (fire/start)
       [RK.BACK]:        'BACK',
       [RK.EXIT]:        'HOME',
-      [RK.INFORMATION]: 'HOME',
+      [RK.INFORMATION]: 'SPEED',    // "i" → speed up (Snake)
     };
     tvService.getCharacteristic(RK).onSet((key) => {
       const tok = KEY_MAP[key];

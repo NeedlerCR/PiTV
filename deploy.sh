@@ -19,6 +19,12 @@ if [ -d homebridge-pitv-tv ]; then
     sudo cp -rf homebridge-pitv-tv /opt/pitv/
 fi
 
+# Install the `screen` CLI (no extension, so not caught by the globs above)
+if [ -f screen ]; then
+    sudo cp -f screen /usr/local/bin/screen
+    sudo chmod +x /usr/local/bin/screen
+fi
+
 # Reload systemd services
 echo "Reloading systemd service..."
 sudo cp pitv-menu.service /etc/systemd/system/
