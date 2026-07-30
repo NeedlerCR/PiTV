@@ -63,7 +63,7 @@ def log_clear() -> None:
 # master that always works.
 
 EMERGENCY_CODE  = "159753"
-FREE_GAMES      = {"SNAKE", "TETRIS", "TICTACTOE"}
+FREE_GAMES      = set()          # every game requires a PIN
 OTP_MAX_FAILS   = 3
 PIN_FILE        = os.path.expanduser("~/.pitv/pins.json")
 
@@ -539,42 +539,52 @@ def _set_kill_switch(on):
 
 _remote_ui       = None
 _remote_ui_tried = False
+_current_game    = None      # binary of the running external game (per-game keys)
 
 
 def _remote_keymap():
+    # Each token maps to one or more keycodes. SELECT and PLAY both send
+    # Enter + Space so either the tap or play/pause confirms a menu AND fires /
+    # starts (e.g. Space Invaders' "press SPACE to play").
     return {
-        "UP":     ecodes.KEY_UP,    "DOWN":  ecodes.KEY_DOWN,
-        "LEFT":   ecodes.KEY_LEFT,  "RIGHT": ecodes.KEY_RIGHT,
-        "SELECT": ecodes.KEY_ENTER, "PLAY":  ecodes.KEY_SPACE,
-        "BACK":   ecodes.KEY_ESC,   "SPEED": ecodes.KEY_R,
+        "UP":     [ecodes.KEY_UP],    "DOWN":  [ecodes.KEY_DOWN],
+        "LEFT":   [ecodes.KEY_LEFT],  "RIGHT": [ecodes.KEY_RIGHT],
+        "SELECT": [ecodes.KEY_ENTER, ecodes.KEY_SPACE],
+        "PLAY":   [ecodes.KEY_ENTER, ecodes.KEY_SPACE],
+        "BACK":   [ecodes.KEY_ESC],   "SPEED": [ecodes.KEY_R],
     }
 
 
 def _remote_inject(token):
-    """Inject a keystroke so the Apple remote can drive EXTERNAL games (which
+    """Inject keystrokes so the Apple remote can drive EXTERNAL games (which
     read the console keyboard, not input_queue). Lazily opens a uinput device;
     if that isn't permitted it silently no-ops (menu/built-in games still
-    work). SELECT=Enter (menu confirm), PLAY/PAUSE=Space (fire/start)."""
+    work)."""
     global _remote_ui, _remote_ui_tried
     if not EVDEV_OK:
         return
-    kc = _remote_keymap().get(token)
-    if kc is None:
+    keys = _remote_keymap().get(token)
+    # In Breakout, launching/shooting the ball is the fire key — let UP do it.
+    if _current_game == "lbreakout2" and token == "UP":
+        keys = [ecodes.KEY_SPACE]
+    if not keys:
         return
     if _remote_ui is None and not _remote_ui_tried:
         _remote_ui_tried = True
         try:
-            keys = sorted(set(_remote_keymap().values()))
-            _remote_ui = UInput({ecodes.EV_KEY: keys}, name="pitv-remote-kb")
+            allk = sorted({k for v in _remote_keymap().values() for k in v}
+                          | {ecodes.KEY_SPACE})
+            _remote_ui = UInput({ecodes.EV_KEY: allk}, name="pitv-remote-kb")
         except Exception as e:
             log(f"Remote uinput unavailable: {e}")
     if _remote_ui:
-        try:
-            _remote_ui.write(ecodes.EV_KEY, kc, 1); _remote_ui.syn()
-            time.sleep(0.03)
-            _remote_ui.write(ecodes.EV_KEY, kc, 0); _remote_ui.syn()
-        except Exception as e:
-            log(f"Remote inject error: {e}")
+        for kc in keys:
+            try:
+                _remote_ui.write(ecodes.EV_KEY, kc, 1); _remote_ui.syn()
+                time.sleep(0.02)
+                _remote_ui.write(ecodes.EV_KEY, kc, 0); _remote_ui.syn()
+            except Exception as e:
+                log(f"Remote inject error: {e}")
 
 
 def listen_cec_udp():
@@ -618,7 +628,12 @@ def listen_cec_udp():
                 elif controller_mode == "GAME_EXTERNAL":
                     _remote_inject(tok)                   # real keys into the game
                 else:
-                    q = "SELECT" if tok in ("PLAY", "ENTER") else tok
+                    if tok == "PLAY":
+                        q = "SPEED"          # play/pause speeds up Snake
+                    elif tok == "ENTER":
+                        q = "SELECT"
+                    else:
+                        q = tok
                     if q in MENU_NAV:
                         input_queue.append(q)             # menu + built-in games
             elif msg.startswith("CEC "):
@@ -735,7 +750,7 @@ def run_game(stdscr, cmd_list: list):
     - Starts the controller-to-keys mapper for ncurses games.
     - Exits on BACK or HOME from the FIFO/controller.
     """
-    global controller_mode
+    global controller_mode, _current_game
     binary = cmd_list[0]
 
     # ── Pre-flight: is the binary installed? (checks /usr/games too) ──
@@ -787,7 +802,7 @@ def run_game(stdscr, cmd_list: list):
             try:
                 mapper_log  = open("/tmp/pitv-mapper.log", "w")
                 mapper_proc = subprocess.Popen(
-                    ["python3", mapper],
+                    ["python3", mapper, binary],   # binary → per-game key tweaks
                     stdout=mapper_log, stderr=subprocess.STDOUT,
                 )
             except Exception as e:
@@ -801,6 +816,7 @@ def run_game(stdscr, cmd_list: list):
     # While the game runs the controller listener must stop injecting menu
     # commands — the mapper delivers movement as real key events instead.
     controller_mode = "GAME_EXTERNAL"
+    _current_game   = binary
     game_log = None
     try:
         try:
@@ -835,6 +851,7 @@ def run_game(stdscr, cmd_list: list):
             mapper_proc.terminate()
     finally:
         controller_mode = "MENU"
+        _current_game   = None
         for f in (mapper_log, game_log):
             if f:
                 try: f.close()
@@ -1756,19 +1773,11 @@ def main(stdscr):
                     current_view = "MENU"
                 elif cmd in ("SELECT","RIGHT"):
                     label, game_cmd, game_key, _ = GAME_OPTIONS[selected_game_idx]
-                    if game_key == "SNAKE":
-                        run_snake(stdscr)
-                        current_view = "GAMES_MENU"
-                    elif game_key == "TICTACTOE":
-                        run_noughts(stdscr)
-                        current_view = "GAMES_MENU"
-                    elif game_key in FREE_GAMES:
-                        run_game(stdscr, game_cmd)
-                        current_view = "GAMES_MENU"
-                    else:
-                        pending_game_key = game_key
-                        pending_game_cmd = game_cmd
-                        current_view     = "KEYPAD"
+                    # Every game needs a PIN now, so always go via the keypad;
+                    # the game (built-in or external) launches after it verifies.
+                    pending_game_key = game_key
+                    pending_game_cmd = game_cmd
+                    current_view     = "KEYPAD"
 
             elif current_view == "KEYPAD":
                 if cmd == "UP":
@@ -1794,7 +1803,12 @@ def main(stdscr):
                         if who:
                             otp_fail_count = 0
                             log(f"{pending_game_key} unlocked by {who}")
-                            run_game(stdscr, pending_game_cmd)
+                            if pending_game_key == "SNAKE":
+                                run_snake(stdscr)
+                            elif pending_game_key == "TICTACTOE":
+                                run_noughts(stdscr)
+                            else:
+                                run_game(stdscr, pending_game_cmd)
                             current_view = "GAMES_MENU"
                         else:
                             otp_fail_count += 1

@@ -44,9 +44,10 @@ the TV's power to Apple HomeKit over HDMI-CEC.
 
 Defined in `GAME_KEYS` / `GAME_OPTIONS` in `tv_menu.py`. `resolve_binary()`
 also searches `/usr/games` (systemd's PATH omits it). SDL games
-(`chromium-bsu`, `lbreakout2`) get `SDL_VIDEODRIVER=kmsdrm`. `FREE_GAMES`
-skip the PIN keypad; everything else needs a personal PIN (or the emergency
-code). PINs are per-person in `~/.pitv/pins.json`, managed by
+(`chromium-bsu`, `lbreakout2`) get `SDL_VIDEODRIVER=kmsdrm`. Every game needs
+a personal PIN (or the emergency code) — `FREE_GAMES` is empty but kept as the
+lever if you want to exempt any. PINs are per-person in `~/.pitv/pins.json`,
+managed by
 `screen pin assign|list|remove|rename` (`pin-admin.py`), and every unlock is
 logged with the person's name so you can see who played. Snake is built-in
 (R button speeds it up; end score gets a speed
