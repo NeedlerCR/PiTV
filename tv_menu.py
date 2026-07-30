@@ -564,9 +564,6 @@ def _remote_inject(token):
     if not EVDEV_OK:
         return
     keys = _remote_keymap().get(token)
-    # In Breakout, launching/shooting the ball is the fire key — let UP do it.
-    if _current_game == "lbreakout2" and token == "UP":
-        keys = [ecodes.KEY_SPACE]
     if not keys:
         return
     if _remote_ui is None and not _remote_ui_tried:

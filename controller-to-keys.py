@@ -120,11 +120,6 @@ def find_gamepads():
 
 
 def main():
-    game = sys.argv[1] if len(sys.argv) > 1 else ""
-    # Per-game key tweaks. In Breakout, "up" launches / shoots the ball.
-    if game == "lbreakout2":
-        PLAYERS[0]["y"] = {-1: ecodes.KEY_SPACE, 1: ecodes.KEY_DOWN}
-
     gamepads = find_gamepads()
     if not gamepads:
         print("No gamepad found — controller-to-keys exiting", flush=True)
