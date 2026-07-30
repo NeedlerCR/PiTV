@@ -491,9 +491,47 @@ def listen_cec_remote():
         time.sleep(1)
 
 
+CEC_UDP_PORT = 8129
+
+
+def listen_cec_udp():
+    """Receive TV power commands from homebridge-pitv-tv over localhost UDP.
+
+    The official Homebridge service is sandboxed and can't write our /tmp FIFO,
+    but it can always send a localhost datagram. This process owns the CEC bus,
+    so it runs cec-cmd.sh itself — freeing and reusing the bus as the same user,
+    regardless of which user Homebridge runs as.
+    """
+    import socket
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", CEC_UDP_PORT))
+    except Exception as e:
+        log(f"CEC UDP listener bind failed: {e}")
+        return
+    log(f"CEC UDP listener ready on 127.0.0.1:{CEC_UDP_PORT}")
+    while True:
+        try:
+            data, _ = sock.recvfrom(64)
+            cmd = data.decode("utf-8", "ignore").strip().upper()
+            if cmd in ("TV_ON", "TV_OFF"):
+                arg = "on 0" if cmd == "TV_ON" else "standby 0"
+                log(f"HomeKit CEC (udp): {cmd}")
+                threading.Thread(
+                    target=subprocess.run,
+                    args=(["/opt/pitv/cec-cmd.sh", arg],),
+                    daemon=True,
+                ).start()
+        except Exception as e:
+            log(f"CEC UDP error: {e}")
+            time.sleep(0.5)
+
+
 threading.Thread(target=listen_fifo,        daemon=True).start()
 threading.Thread(target=listen_cec_remote,  daemon=True).start()
 threading.Thread(target=listen_controllers, daemon=True).start()
+threading.Thread(target=listen_cec_udp,     daemon=True).start()
 
 log("PiTV started")
 

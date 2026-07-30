@@ -12,15 +12,17 @@
 // as its own TV tile. HomeKit also allows only one TV per bridge, so external
 // publishing is the correct, supported approach.
 
-const { execFile } = require('child_process');
+const dgram = require('dgram');
 
 const PLUGIN_NAME   = 'homebridge-pitv-tv';
 const PLATFORM_NAME = 'PiTVTelevision';
-// We send power commands to tv_menu.py's FIFO rather than calling cec-cmd.sh
-// directly: tv_menu.py owns the CEC bus and runs the command itself, so this
-// works no matter which user Homebridge runs as. The write is timeout-guarded
-// so Homebridge never hangs if tv_menu isn't running.
-const FIFO = '/tmp/tv_menu.fifo';
+// We send power commands to tv_menu.py over a localhost UDP datagram rather
+// than a /tmp file: the official Homebridge service is sandboxed
+// (ProtectSystem=strict) and can't write /tmp, but it can always send a
+// localhost packet. tv_menu.py owns the CEC bus and runs the command itself,
+// so this works no matter which user Homebridge runs as.
+const CEC_UDP_HOST = '127.0.0.1';
+const CEC_UDP_PORT = 8129;
 
 let Service, Characteristic, Categories;
 
@@ -75,11 +77,13 @@ class PiTVTelevisionPlatform {
       .onSet((value) => {
         this.active = value;
         const token = value ? 'TV_ON' : 'TV_OFF';
-        this.log.info(`HomeKit -> TV ${value ? 'ON' : 'OFF'} (${token} -> ${FIFO})`);
-        execFile('timeout', ['3', 'sh', '-c', `printf '%s\\n' '${token}' > ${FIFO}`],
-          (err) => {
-            if (err) this.log.error(`Writing ${token} to ${FIFO} failed: ${err.message}`);
-          });
+        const msg = Buffer.from(token);
+        const client = dgram.createSocket('udp4');
+        client.send(msg, CEC_UDP_PORT, CEC_UDP_HOST, (err) => {
+          if (err) this.log.error(`Sending ${token} to ${CEC_UDP_HOST}:${CEC_UDP_PORT} failed: ${err.message}`);
+          else this.log.info(`HomeKit -> TV ${value ? 'ON' : 'OFF'} (${token} udp ${CEC_UDP_HOST}:${CEC_UDP_PORT})`);
+          client.close();
+        });
       });
 
     // HomeKit wants a TV to expose at least one input source. Define it fully
