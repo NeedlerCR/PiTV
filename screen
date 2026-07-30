@@ -20,7 +20,7 @@ Screensavers (optional duration in seconds):
 
 Other modes:
   screen mirror
-  screen game <invaders|tetris|snake|pacman|shooter|bomberman|breakout|vstetris|tictactoe>
+  screen game <snake|tetris|invaders|breakout|shooter|tictactoe>
 
 Controller:
   screen controller        scan for Bluetooth controller (60 seconds)
@@ -88,11 +88,8 @@ case "$CMD" in
             inv|invaders|space)   KEY="INVADERS"   ;;
             tet|tetris)           KEY="TETRIS"      ;;
             snake|sn)             KEY="SNAKE"       ;;
-            pac|pacman)           KEY="PACMAN"      ;;
             shoot|shooter|bsu)    KEY="SHOOTER"     ;;
-            bomb|bomberman)       KEY="BOMBERMAN"   ;;
             break|breakout)       KEY="BREAKOUT"    ;;
-            vs|vstetris|duel)     KEY="TETRISDUEL"  ;;
             ttt|tictactoe|toe|noughts|nc) KEY="TICTACTOE" ;;
             *)                    KEY="${KEY^^}"    ;;
         esac

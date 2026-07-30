@@ -153,27 +153,21 @@ EXTERNAL_CMDS = {
 
 GAME_KEYS = {
     "SNAKE":      ["snake"],
-    "TETRIS":     ["bastet"],
+    "TETRIS":     ["vitetris"],         # normal Tetris; its menu also has 2-player
     "INVADERS":   ["ninvaders"],
-    "PACMAN":     ["pacman4console"],
-    "BOMBERMAN":  ["bombardier"],
     "BREAKOUT":   ["lbreakout2"],
     "SHOOTER":    ["chromium-bsu"],
-    "TETRISDUEL": ["vitetris"],         # 2-player versus Tetris (vitetris pkg)
-    "TICTACTOE":  ["nettoe"],           # 1-2 player Tic-Tac-Toe (nettoe pkg)
+    "TICTACTOE":  ["nettoe"],           # 1-2 player Noughts & Crosses (nettoe pkg)
 }
 
 # (label, cmd_list, game_key, is_2player)
 GAME_OPTIONS = [
-    ("SNAKE",          ["snake"],           "SNAKE",      False),
-    ("TETRIS",         ["bastet"],          "TETRIS",     False),
-    ("SPACE INVADERS", ["ninvaders"],       "INVADERS",   False),
-    ("PAC-MAN",        ["pacman4console"],  "PACMAN",     False),
-    ("BOMBERMAN",      ["bombardier"],      "BOMBERMAN",  False),
-    ("BREAKOUT",       ["lbreakout2"],      "BREAKOUT",   False),
-    ("SPACE SHOOTER",  ["chromium-bsu"],    "SHOOTER",    False),
-    ("VS TETRIS",      ["vitetris"],        "TETRISDUEL", True),
-    ("NOUGHTS & CROSSES", ["nettoe"],       "TICTACTOE",  True),
+    ("SNAKE",             ["snake"],          "SNAKE",     False),
+    ("TETRIS",            ["vitetris"],       "TETRIS",    True),
+    ("SPACE INVADERS",    ["ninvaders"],      "INVADERS",  False),
+    ("BREAKOUT",          ["lbreakout2"],     "BREAKOUT",  False),
+    ("SPACE SHOOTER",     ["chromium-bsu"],   "SHOOTER",   False),
+    ("NOUGHTS & CROSSES", ["nettoe"],         "TICTACTOE", True),
 ]
 
 # Debian's bsdgames/bastet/etc packages install into /usr/games, but the
@@ -509,6 +503,33 @@ def _run_cec_cmd(cmd_str):
     threading.Thread(target=_run, daemon=True).start()
 
 
+_kill_stop   = threading.Event()
+_kill_thread = None
+
+
+def _set_kill_switch(on):
+    """HomeKit 'kill switch'. While on, repeatedly send CEC standby so the TV
+    can't stay powered on; turning it off stops that. Re-sends every 15 s so a
+    TV that gets switched on is forced back off within a few seconds."""
+    global _kill_thread
+    if on:
+        if _kill_thread and _kill_thread.is_alive():
+            return
+        _kill_stop.clear()
+
+        def _loop():
+            while not _kill_stop.is_set():
+                _run_cec_cmd("standby 0")
+                _kill_stop.wait(15)
+
+        _kill_thread = threading.Thread(target=_loop, daemon=True)
+        _kill_thread.start()
+        log("Kill switch ON — forcing TV to stay off")
+    else:
+        _kill_stop.set()
+        log("Kill switch OFF")
+
+
 def listen_cec_udp():
     """Control channel from homebridge-pitv-tv over localhost UDP.
 
@@ -538,6 +559,8 @@ def listen_cec_udp():
             if up in ("TV_ON", "TV_OFF"):
                 log(f"HomeKit CEC: {up}")
                 _run_cec_cmd("on 0" if up == "TV_ON" else "standby 0")
+            elif up in ("KILL_ON", "KILL_OFF"):
+                _set_kill_switch(up == "KILL_ON")
             elif up.startswith("KEY "):
                 tok = up[4:].strip()
                 if tok in NAV:
@@ -664,10 +687,7 @@ def run_game(stdscr, cmd_list: list):
     if not resolved:
         pkg_hint = {
             "snake":          "bsdgames",
-            "bastet":         "bastet",
             "ninvaders":      "ninvaders",
-            "pacman4console": "pacman4console",
-            "bombardier":     "bombardier",
             "lbreakout2":     "lbreakout2",
             "chromium-bsu":   "chromium-bsu",
             "vitetris":       "vitetris",
@@ -690,6 +710,7 @@ def run_game(stdscr, cmd_list: list):
     cmd_list = [resolved] + cmd_list[1:]
 
     log(f"Game start: {binary} -> {resolved}")
+    game_t0 = time.time()
     curses.def_prog_mode()
     curses.endwin()
     _reset_terminal()
@@ -764,7 +785,7 @@ def run_game(stdscr, cmd_list: list):
                 try: f.close()
                 except Exception: pass
 
-    log(f"Game stop: {binary}")
+    log(f"Game stop: {binary} rc={proc.returncode} after {time.time()-game_t0:.1f}s")
     curses.reset_prog_mode(); curses.curs_set(0)
 
 

@@ -2,24 +2,21 @@
 
 // homebridge-pitv-tv
 //
-// Publishes a single HomeKit *Television* accessory for the Pi's HDMI-CEC TV:
-//   - power on/off
-//   - input switching (each input sends a raw CEC frame)
-//   - remote-key navigation, so the Apple Home / Control Centre remote drives
-//     the PiTV menu
+// Publishes:
+//   - a HomeKit *Television* (external accessory, so it shows as a TV tile,
+//     not inside the bridge): power, input switching, and remote-key
+//     navigation of the PiTV menu.
+//   - a *Kill Switch* (bridged Switch): while on, tv_menu keeps forcing the
+//     TV off; turning it off stops that.
 //
-// A Television MUST be published as an EXTERNAL accessory
-// (api.publishExternalAccessories) — bridged accessories appear *inside* the
-// Homebridge bridge, whereas an external accessory with category TELEVISION
-// appears as its own TV tile. That's the fix for "shows up as a bridge".
-//
-// All actions are sent to tv_menu.py as a localhost UDP datagram
+// Everything is sent to tv_menu.py as a localhost UDP datagram
 // (127.0.0.1:8129). The official Homebridge service is sandboxed
 // (ProtectSystem=strict) so it can't write a /tmp FIFO, but it can always send
-// a localhost packet. tv_menu.py owns the CEC bus and runs the commands itself.
-//   TV_ON | TV_OFF   -> power
-//   CEC <tx frame>   -> input switching
-//   KEY <TOKEN>      -> menu navigation (UP/DOWN/LEFT/RIGHT/SELECT/BACK/HOME)
+// a localhost packet. tv_menu.py owns the CEC bus and runs the commands.
+//   TV_ON | TV_OFF        -> power
+//   CEC <tx frame>        -> input switching
+//   KEY <TOKEN>           -> menu navigation
+//   KILL_ON | KILL_OFF    -> kill switch
 
 const dgram = require('dgram');
 
@@ -46,24 +43,31 @@ module.exports = (api) => {
 
 class PiTVTelevisionPlatform {
   constructor(log, config, api) {
-    this.log    = log;
-    this.config = config || {};
-    this.api    = api;
-    this.name   = this.config.name || 'TV';
-    this.inputs = (Array.isArray(this.config.inputs) && this.config.inputs.length)
+    this.log         = log;
+    this.config      = config || {};
+    this.api         = api;
+    this.name        = this.config.name || 'TV';
+    this.inputs      = (Array.isArray(this.config.inputs) && this.config.inputs.length)
       ? this.config.inputs
       : DEFAULT_INPUTS;
+    this.accessories = [];   // cached bridged accessories (the kill switch)
 
     // CEC state can't be polled reliably (single-owner bus), so we remember
     // what HomeKit last set and report that back.
-    this.active      = 0;   // Characteristic.Active.INACTIVE
+    this.active      = 0;    // Characteristic.Active.INACTIVE
     this.activeInput = 1;
+    this.killOn      = false;
 
-    this.api.on('didFinishLaunching', () => this.publishTelevision());
+    this.api.on('didFinishLaunching', () => {
+      this.publishTelevision();
+      this.ensureKillSwitch();
+    });
   }
 
-  // Required stub for platform plugins.
-  configureAccessory() {}
+  // Restore cached bridged accessories (kill switch) across restarts.
+  configureAccessory(accessory) {
+    this.accessories.push(accessory);
+  }
 
   // Fire-and-forget a UDP datagram to tv_menu.py.
   send(str) {
@@ -102,7 +106,7 @@ class PiTVTelevisionPlatform {
         this.send(value ? 'TV_ON' : 'TV_OFF');
       });
 
-    // Input switching. Selecting an input in the Home app sends its CEC frame.
+    // Input switching. Selecting an input sends its CEC frame.
     tvService.getCharacteristic(Characteristic.ActiveIdentifier)
       .onGet(() => this.activeInput)
       .onSet((id) => {
@@ -161,5 +165,27 @@ class PiTVTelevisionPlatform {
     this.api.publishExternalAccessories(PLUGIN_NAME, [tv]);
     this.log.info(`Published Television accessory "${this.name}" (external) `
       + `with ${this.inputs.length} input(s).`);
+  }
+
+  // Bridged Switch: while on, tv_menu keeps the TV forced off.
+  ensureKillSwitch() {
+    const name = `${this.name} Kill Switch`;
+    const uuid = this.api.hap.uuid.generate(`${PLUGIN_NAME}:killswitch`);
+    let acc = this.accessories.find((a) => a.UUID === uuid);
+    if (!acc) {
+      acc = new this.api.platformAccessory(name, uuid);
+      acc.addService(Service.Switch, name);
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [acc]);
+      this.accessories.push(acc);
+    }
+    const svc = acc.getService(Service.Switch)
+      || acc.addService(Service.Switch, name);
+    svc.getCharacteristic(Characteristic.On)
+      .onGet(() => this.killOn)
+      .onSet((value) => {
+        this.killOn = value;
+        this.send(value ? 'KILL_ON' : 'KILL_OFF');
+      });
+    this.log.info(`Kill switch "${name}" ready.`);
   }
 }

@@ -47,7 +47,10 @@ also searches `/usr/games` (systemd's PATH omits it). SDL games
 (`chromium-bsu`, `lbreakout2`) get `SDL_VIDEODRIVER=kmsdrm`. `FREE_GAMES`
 skip the OTP keypad; everything else needs a TOTP code (or the emergency
 code). Snake is built-in (R button speeds it up; end score gets a speed
-multiplier). Install extras: `sudo apt install -y vitetris nettoe`.
+multiplier). Tetris is `vitetris` (its own menu has 1- and 2-player);
+Noughts & Crosses is `nettoe`. Install extras:
+`sudo apt install -y vitetris nettoe`. `run_game` logs each game's exit code
+and duration to `/tmp/pitv.log` (an instant `rc!=0` = crash-on-launch).
 
 ## Screen mirroring
 
@@ -66,7 +69,9 @@ datagram** to `127.0.0.1:8129` (the `listen_cec_udp` thread), which accepts:
 `TV_ON`/`TV_OFF` (power → `cec-cmd.sh on 0`/`standby 0`), `CEC tx <frame>`
 (input switching via a whitelisted raw CEC frame), and `KEY <TOKEN>` (menu
 navigation, so the **Apple Home / Control Centre remote** drives the menu by
-feeding `input_queue`). UDP is used because the official Homebridge service is
+feeding `input_queue`), and `KILL_ON`/`KILL_OFF` (a bridged Switch in the
+plugin — while on, tv_menu re-sends CEC standby every 15 s so the TV can't
+stay on). UDP is used because the official Homebridge service is
 sandboxed (`ProtectSystem=strict`) and can't write a `/tmp` FIFO, but it can
 always send a localhost packet. `tv_menu.py` owns the CEC bus and runs
 `cec-cmd.sh` itself with output suppressed (so it never scribbles on the menu).

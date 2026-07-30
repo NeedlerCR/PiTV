@@ -13,20 +13,14 @@ QR_MODE=false
 
 declare -A SECRETS=(
     ["SPACE INVADERS"]="JBSWY3DPEHPK3PXP"
-    ["PAC-MAN"]="MFRA2YTMMFRA2YTM"
     ["SPACE SHOOTER"]="OB2XI2DFON2GK3TF"
-    ["BOMBERMAN"]="KVKFKRCPNZQUYFY4"
     ["BREAKOUT"]="N5XCAZDGNZTGS3TN"
-    ["VS TETRIS"]="NBQXG5DFMFZGKZLB"
 )
 
 declare -A KEYS=(
     ["SPACE INVADERS"]="INVADERS"
-    ["PAC-MAN"]="PACMAN"
     ["SPACE SHOOTER"]="SHOOTER"
-    ["BOMBERMAN"]="BOMBERMAN"
     ["BREAKOUT"]="BREAKOUT"
-    ["VS TETRIS"]="TETRISDUEL"
 )
 
 echo ""
@@ -38,8 +32,7 @@ echo "  Free games (no code needed): Snake, Tetris, Tic-Tac-Toe"
 echo "=================================================================="
 echo ""
 
-for game in "SPACE INVADERS" "PAC-MAN" "SPACE SHOOTER" \
-            "BOMBERMAN" "BREAKOUT" "VS TETRIS"; do
+for game in "SPACE INVADERS" "SPACE SHOOTER" "BREAKOUT"; do
     secret="${SECRETS[$game]}"
     key="${KEYS[$game]}"
     label="PiTV:${key}"
