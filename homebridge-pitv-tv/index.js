@@ -25,11 +25,14 @@ const PLATFORM_NAME = 'PiTVTelevision';
 const CEC_UDP_HOST  = '127.0.0.1';
 const CEC_UDP_PORT  = 8129;
 
-// Default inputs match the frames from the known-working legacy config:
-// "tx 4f:82:X0:00" = broadcast Active Source = physical address X.0.0.0.
+// Broadcast "Active Source = <physical address>" so the TV switches input.
+// Initiator "1" = the Pi's CEC logical address (libcec registers as Recorder 1
+// / LA 1 — confirmed by `cec-client 'scan'`); a mismatched initiator makes the
+// kernel reject the frame with EINVAL. Sky sits at 1.0.0.0 (HDMI 1), the Pi at
+// 2.0.0.0 (HDMI 2).
 const DEFAULT_INPUTS = [
-  { name: 'HDMI 1', cec: 'tx 4f:82:10:00' },
-  { name: 'HDMI 2', cec: 'tx 4f:82:20:00' },
+  { name: 'Sky',  cec: 'tx 1f:82:10:00' },   // HDMI 1
+  { name: 'PiTV', cec: 'tx 1f:82:20:00' },   // HDMI 2
 ];
 
 let Service, Characteristic, Categories;
