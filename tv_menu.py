@@ -2,6 +2,7 @@ import curses
 import math
 import os
 import random
+import re
 import selectors
 import shutil
 import subprocess
@@ -441,13 +442,8 @@ def listen_fifo():
                     # process owns the CEC bus, so cec-cmd.sh can free and reuse
                     # it regardless of which user Homebridge runs as.
                     if cmd in ("TV_ON", "TV_OFF"):
-                        arg = "on 0" if cmd == "TV_ON" else "standby 0"
                         log(f"HomeKit CEC: {cmd}")
-                        threading.Thread(
-                            target=subprocess.run,
-                            args=(["/opt/pitv/cec-cmd.sh", arg],),
-                            daemon=True,
-                        ).start()
+                        _run_cec_cmd("on 0" if cmd == "TV_ON" else "standby 0")
                         continue
 
                     log(f"FIFO: {raw[:60]}")
@@ -492,37 +488,67 @@ def listen_cec_remote():
 
 
 CEC_UDP_PORT = 8129
+# Whitelisted raw CEC frame, e.g. "tx 4f:82:10:00" (used for input switching).
+_CEC_TX_RE = re.compile(r"^tx([ ][0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2})*)+$")
+
+
+def _run_cec_cmd(cmd_str):
+    """Run cec-cmd.sh with its (chatty) output suppressed.
+
+    cec-client prints 'opening a connection to the CEC adapter…' to stdout;
+    if that inherited the menu tty it scribbled over the UI. Discarding it
+    keeps the screen clean.
+    """
+    def _run():
+        try:
+            subprocess.run(["/opt/pitv/cec-cmd.sh", cmd_str],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=15)
+        except Exception as e:
+            log(f"cec-cmd.sh {cmd_str!r} error: {e}")
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def listen_cec_udp():
-    """Receive TV power commands from homebridge-pitv-tv over localhost UDP.
+    """Control channel from homebridge-pitv-tv over localhost UDP.
 
-    The official Homebridge service is sandboxed and can't write our /tmp FIFO,
-    but it can always send a localhost datagram. This process owns the CEC bus,
-    so it runs cec-cmd.sh itself — freeing and reusing the bus as the same user,
-    regardless of which user Homebridge runs as.
+    Homebridge is sandboxed and can't write our /tmp FIFO, but it can always
+    send a localhost datagram. Accepted messages:
+      TV_ON / TV_OFF   -> CEC power on / standby (this process owns the bus)
+      CEC tx <frame>   -> raw CEC frame, e.g. input switching (whitelisted)
+      KEY <TOKEN>      -> menu navigation, so the Apple Home / Control Centre
+                          remote drives the menu (UP/DOWN/LEFT/RIGHT/SELECT/
+                          BACK/HOME)
     """
     import socket
+    NAV = {"UP", "DOWN", "LEFT", "RIGHT", "SELECT", "BACK", "HOME"}
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("127.0.0.1", CEC_UDP_PORT))
     except Exception as e:
-        log(f"CEC UDP listener bind failed: {e}")
+        log(f"Control UDP listener bind failed: {e}")
         return
-    log(f"CEC UDP listener ready on 127.0.0.1:{CEC_UDP_PORT}")
+    log(f"Control UDP listener ready on 127.0.0.1:{CEC_UDP_PORT}")
     while True:
         try:
-            data, _ = sock.recvfrom(64)
-            cmd = data.decode("utf-8", "ignore").strip().upper()
-            if cmd in ("TV_ON", "TV_OFF"):
-                arg = "on 0" if cmd == "TV_ON" else "standby 0"
-                log(f"HomeKit CEC (udp): {cmd}")
-                threading.Thread(
-                    target=subprocess.run,
-                    args=(["/opt/pitv/cec-cmd.sh", arg],),
-                    daemon=True,
-                ).start()
+            data, _ = sock.recvfrom(128)
+            msg = data.decode("utf-8", "ignore").strip()
+            up  = msg.upper()
+            if up in ("TV_ON", "TV_OFF"):
+                log(f"HomeKit CEC: {up}")
+                _run_cec_cmd("on 0" if up == "TV_ON" else "standby 0")
+            elif up.startswith("KEY "):
+                tok = up[4:].strip()
+                if tok in NAV:
+                    input_queue.append(tok)
+            elif msg.startswith("CEC "):
+                frame = msg[4:].strip()
+                if _CEC_TX_RE.match(frame):
+                    log(f"HomeKit CEC frame: {frame}")
+                    _run_cec_cmd(frame)
+                else:
+                    log(f"CEC UDP: rejected {frame!r}")
         except Exception as e:
             log(f"CEC UDP error: {e}")
             time.sleep(0.5)

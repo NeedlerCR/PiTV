@@ -2,7 +2,7 @@
   "pluginAlias": "PiTVTelevision",
   "pluginType": "platform",
   "singular": true,
-  "headerDisplay": "Exposes the Pi's HDMI-CEC TV to HomeKit as a Television accessory (power on/off). Published as an external accessory so it appears as a TV tile, not inside the bridge.",
+  "headerDisplay": "Exposes the Pi's HDMI-CEC TV to HomeKit as a Television accessory (power, input switching, and remote-key navigation of the PiTV menu). Published as an external accessory so it appears as a TV tile, not inside the bridge.",
   "schema": {
     "type": "object",
     "properties": {
@@ -12,6 +12,27 @@
         "default": "TV",
         "required": true,
         "description": "The name shown on the TV tile in the Home app."
+      },
+      "inputs": {
+        "title": "Inputs",
+        "type": "array",
+        "description": "Selectable inputs. Each sends a raw CEC frame when chosen. Defaults to HDMI 1/2 using the standard Active-Source frames.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "title": "Name",
+              "type": "string",
+              "required": true
+            },
+            "cec": {
+              "title": "CEC frame",
+              "type": "string",
+              "required": true,
+              "description": "e.g. tx 4f:82:10:00 (Active Source = HDMI 1)"
+            }
+          }
+        }
       }
     }
   }

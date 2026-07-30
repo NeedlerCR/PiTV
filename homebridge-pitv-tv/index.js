@@ -2,27 +2,38 @@
 
 // homebridge-pitv-tv
 //
-// Publishes a single HomeKit *Television* accessory whose power on/off is
-// wired to the Pi's HDMI-CEC via /opt/pitv/cec-cmd.sh.
+// Publishes a single HomeKit *Television* accessory for the Pi's HDMI-CEC TV:
+//   - power on/off
+//   - input switching (each input sends a raw CEC frame)
+//   - remote-key navigation, so the Apple Home / Control Centre remote drives
+//     the PiTV menu
 //
-// The important detail — and the reason a TV normally shows up wrong in the
-// Home app — is that a Television MUST be published as an EXTERNAL accessory
-// (api.publishExternalAccessories). Bridged accessories appear *inside* the
-// Homebridge bridge; an external accessory with category TELEVISION appears
-// as its own TV tile. HomeKit also allows only one TV per bridge, so external
-// publishing is the correct, supported approach.
+// A Television MUST be published as an EXTERNAL accessory
+// (api.publishExternalAccessories) — bridged accessories appear *inside* the
+// Homebridge bridge, whereas an external accessory with category TELEVISION
+// appears as its own TV tile. That's the fix for "shows up as a bridge".
+//
+// All actions are sent to tv_menu.py as a localhost UDP datagram
+// (127.0.0.1:8129). The official Homebridge service is sandboxed
+// (ProtectSystem=strict) so it can't write a /tmp FIFO, but it can always send
+// a localhost packet. tv_menu.py owns the CEC bus and runs the commands itself.
+//   TV_ON | TV_OFF   -> power
+//   CEC <tx frame>   -> input switching
+//   KEY <TOKEN>      -> menu navigation (UP/DOWN/LEFT/RIGHT/SELECT/BACK/HOME)
 
 const dgram = require('dgram');
 
 const PLUGIN_NAME   = 'homebridge-pitv-tv';
 const PLATFORM_NAME = 'PiTVTelevision';
-// We send power commands to tv_menu.py over a localhost UDP datagram rather
-// than a /tmp file: the official Homebridge service is sandboxed
-// (ProtectSystem=strict) and can't write /tmp, but it can always send a
-// localhost packet. tv_menu.py owns the CEC bus and runs the command itself,
-// so this works no matter which user Homebridge runs as.
-const CEC_UDP_HOST = '127.0.0.1';
-const CEC_UDP_PORT = 8129;
+const CEC_UDP_HOST  = '127.0.0.1';
+const CEC_UDP_PORT  = 8129;
+
+// Default inputs match the frames from the known-working legacy config:
+// "tx 4f:82:X0:00" = broadcast Active Source = physical address X.0.0.0.
+const DEFAULT_INPUTS = [
+  { name: 'HDMI 1', cec: 'tx 4f:82:10:00' },
+  { name: 'HDMI 2', cec: 'tx 4f:82:20:00' },
+];
 
 let Service, Characteristic, Categories;
 
@@ -39,18 +50,30 @@ class PiTVTelevisionPlatform {
     this.config = config || {};
     this.api    = api;
     this.name   = this.config.name || 'TV';
+    this.inputs = (Array.isArray(this.config.inputs) && this.config.inputs.length)
+      ? this.config.inputs
+      : DEFAULT_INPUTS;
 
-    // CEC power state can't be polled reliably (the bus is single-owner), so
-    // we remember what HomeKit last set and report that back.
-    this.active = Characteristic.Active.INACTIVE;
+    // CEC state can't be polled reliably (single-owner bus), so we remember
+    // what HomeKit last set and report that back.
+    this.active      = 0;   // Characteristic.Active.INACTIVE
+    this.activeInput = 1;
 
-    // Publish once Homebridge has finished starting up.
     this.api.on('didFinishLaunching', () => this.publishTelevision());
   }
 
-  // Required stub for platform plugins. We publish the TV fresh as an external
-  // accessory each launch, so there is no cached accessory to restore.
+  // Required stub for platform plugins.
   configureAccessory() {}
+
+  // Fire-and-forget a UDP datagram to tv_menu.py.
+  send(str) {
+    const client = dgram.createSocket('udp4');
+    client.send(Buffer.from(str), CEC_UDP_PORT, CEC_UDP_HOST, (err) => {
+      if (err) this.log.error(`UDP send "${str}" failed: ${err.message}`);
+      else     this.log.info(`-> ${str}`);
+      client.close();
+    });
+  }
 
   publishTelevision() {
     const uuid = this.api.hap.uuid.generate(`${PLUGIN_NAME}:${this.name}`);
@@ -71,53 +94,72 @@ class PiTVTelevisionPlatform {
         Characteristic.SleepDiscoveryMode.ALWAYS_DISCOVERABLE,
       );
 
-    // Power on/off — this is the control HomeKit shows on the TV tile.
+    // Power on/off — the control on the TV tile.
     tvService.getCharacteristic(Characteristic.Active)
       .onGet(() => this.active)
       .onSet((value) => {
         this.active = value;
-        const token = value ? 'TV_ON' : 'TV_OFF';
-        const msg = Buffer.from(token);
-        const client = dgram.createSocket('udp4');
-        client.send(msg, CEC_UDP_PORT, CEC_UDP_HOST, (err) => {
-          if (err) this.log.error(`Sending ${token} to ${CEC_UDP_HOST}:${CEC_UDP_PORT} failed: ${err.message}`);
-          else this.log.info(`HomeKit -> TV ${value ? 'ON' : 'OFF'} (${token} udp ${CEC_UDP_HOST}:${CEC_UDP_PORT})`);
-          client.close();
-        });
+        this.send(value ? 'TV_ON' : 'TV_OFF');
       });
 
-    // HomeKit wants a TV to expose at least one input source. Define it fully
-    // (Name + ConfiguredName + both visibility states) so the Home app lists
-    // it on the "choose your inputs" screen during setup instead of finding
-    // none.
-    tvService.setCharacteristic(Characteristic.ActiveIdentifier, 1);
-    const input = tv.addService(Service.InputSource, 'hdmi', 'HDMI');
-    input
-      .setCharacteristic(Characteristic.Identifier, 1)
-      .setCharacteristic(Characteristic.Name, 'HDMI')
-      .setCharacteristic(Characteristic.ConfiguredName, 'HDMI')
-      .setCharacteristic(
-        Characteristic.IsConfigured,
-        Characteristic.IsConfigured.CONFIGURED,
-      )
-      .setCharacteristic(
-        Characteristic.InputSourceType,
-        Characteristic.InputSourceType.HDMI,
-      )
-      .setCharacteristic(
-        Characteristic.CurrentVisibilityState,
-        Characteristic.CurrentVisibilityState.SHOWN,
-      )
-      .setCharacteristic(
-        Characteristic.TargetVisibilityState,
-        Characteristic.TargetVisibilityState.SHOWN,
-      );
-    tvService.addLinkedService(input);
+    // Input switching. Selecting an input in the Home app sends its CEC frame.
+    tvService.getCharacteristic(Characteristic.ActiveIdentifier)
+      .onGet(() => this.activeInput)
+      .onSet((id) => {
+        this.activeInput = id;
+        const inp = this.inputs[id - 1];
+        if (inp && inp.cec) this.send(`CEC ${inp.cec}`);
+      });
+    tvService.setCharacteristic(Characteristic.ActiveIdentifier, this.activeInput);
+
+    this.inputs.forEach((inp, i) => {
+      const id  = i + 1;
+      const src = tv.addService(Service.InputSource, `input${id}`, inp.name);
+      src
+        .setCharacteristic(Characteristic.Identifier, id)
+        .setCharacteristic(Characteristic.Name, inp.name)
+        .setCharacteristic(Characteristic.ConfiguredName, inp.name)
+        .setCharacteristic(
+          Characteristic.IsConfigured,
+          Characteristic.IsConfigured.CONFIGURED,
+        )
+        .setCharacteristic(
+          Characteristic.InputSourceType,
+          Characteristic.InputSourceType.HDMI,
+        )
+        .setCharacteristic(
+          Characteristic.CurrentVisibilityState,
+          Characteristic.CurrentVisibilityState.SHOWN,
+        )
+        .setCharacteristic(
+          Characteristic.TargetVisibilityState,
+          Characteristic.TargetVisibilityState.SHOWN,
+        );
+      tvService.addLinkedService(src);
+    });
+
+    // Remote-key navigation. The Home app remote (and the Control Centre TV
+    // remote) send these; we forward them to the PiTV menu as nav tokens.
+    const RK = Characteristic.RemoteKey;
+    const KEY_MAP = {
+      [RK.ARROW_UP]:    'UP',
+      [RK.ARROW_DOWN]:  'DOWN',
+      [RK.ARROW_LEFT]:  'LEFT',
+      [RK.ARROW_RIGHT]: 'RIGHT',
+      [RK.SELECT]:      'SELECT',
+      [RK.PLAY_PAUSE]:  'SELECT',
+      [RK.BACK]:        'BACK',
+      [RK.EXIT]:        'HOME',
+      [RK.INFORMATION]: 'HOME',
+    };
+    tvService.getCharacteristic(RK).onSet((key) => {
+      const tok = KEY_MAP[key];
+      if (tok) this.send(`KEY ${tok}`);
+    });
 
     // Publish EXTERNALLY so it becomes its own TV tile, not a bridge entry.
     this.api.publishExternalAccessories(PLUGIN_NAME, [tv]);
-    this.log.info(`Published Television accessory "${this.name}" as an external accessory.`);
-    this.log.info('Add it in the Home app via "Add Accessory" using the '
-      + 'Homebridge setup code shown at startup.');
+    this.log.info(`Published Television accessory "${this.name}" (external) `
+      + `with ${this.inputs.length} input(s).`);
   }
 }

@@ -61,14 +61,16 @@ Needs `uxplay` + gstreamer plugins + `avahi-daemon` (mDNS).
 `homebridge-pitv-tv/` is a local Homebridge platform plugin that publishes a
 **Television** accessory as an **external accessory**
 (`publishExternalAccessories`) so it appears as a TV tile in the Home app —
-*not* inside the bridge. Power on/off is sent as `TV_ON` / `TV_OFF` over a
-**localhost UDP datagram** to `127.0.0.1:8129` (a `listen_cec_udp` thread in
-`tv_menu.py`); this process owns the CEC bus and runs `/opt/pitv/cec-cmd.sh`
-(`on 0` / `standby 0`) itself. UDP is used because the official Homebridge
-service is sandboxed (`ProtectSystem=strict`) and can't write a `/tmp` FIFO,
-but it can always send a localhost packet — so no Homebridge sandbox changes
-are needed. (`tv-state.sh` was the older homebridge-cmd4 approach and is
-superseded.)
+*not* inside the bridge. It talks to `tv_menu.py` over a **localhost UDP
+datagram** to `127.0.0.1:8129` (the `listen_cec_udp` thread), which accepts:
+`TV_ON`/`TV_OFF` (power → `cec-cmd.sh on 0`/`standby 0`), `CEC tx <frame>`
+(input switching via a whitelisted raw CEC frame), and `KEY <TOKEN>` (menu
+navigation, so the **Apple Home / Control Centre remote** drives the menu by
+feeding `input_queue`). UDP is used because the official Homebridge service is
+sandboxed (`ProtectSystem=strict`) and can't write a `/tmp` FIFO, but it can
+always send a localhost packet. `tv_menu.py` owns the CEC bus and runs
+`cec-cmd.sh` itself with output suppressed (so it never scribbles on the menu).
+(`tv-state.sh` was the older homebridge-cmd4 approach and is superseded.)
 
 ## Secrets — never commit
 
