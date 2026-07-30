@@ -173,7 +173,7 @@ GAME_OPTIONS = [
     ("BREAKOUT",       ["lbreakout2"],      "BREAKOUT",   False),
     ("SPACE SHOOTER",  ["chromium-bsu"],    "SHOOTER",    False),
     ("VS TETRIS",      ["vitetris"],        "TETRISDUEL", True),
-    ("TIC-TAC-TOE",    ["nettoe"],          "TICTACTOE",  True),
+    ("NOUGHTS & CROSSES", ["nettoe"],       "TICTACTOE",  True),
 ]
 
 # Debian's bsdgames/bastet/etc packages install into /usr/games, but the

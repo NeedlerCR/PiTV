@@ -93,7 +93,7 @@ case "$CMD" in
             bomb|bomberman)       KEY="BOMBERMAN"   ;;
             break|breakout)       KEY="BREAKOUT"    ;;
             vs|vstetris|duel)     KEY="TETRISDUEL"  ;;
-            ttt|tictactoe|toe)    KEY="TICTACTOE"   ;;
+            ttt|tictactoe|toe|noughts|nc) KEY="TICTACTOE" ;;
             *)                    KEY="${KEY^^}"    ;;
         esac
         _send_raw "RUN GAME INDEFINITE ${KEY}"
