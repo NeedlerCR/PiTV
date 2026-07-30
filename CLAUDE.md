@@ -6,7 +6,7 @@ the TV's power to Apple HomeKit over HDMI-CEC.
 
 ## Git settings
 
-- Git author: NeedlerCR <jackdaw.juncos-8n@icloud.com>
+- Git author + Commitor + anything else: NeedlerCR <jackdaw.juncos-8n@icloud.com>
 - Commits: clean single line. No chat links, URLs, or trailers.
 
 ## Runtime layout
