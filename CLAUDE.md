@@ -47,7 +47,12 @@ also searches `/usr/games` (systemd's PATH omits it). SDL games
 (`chromium-bsu`, `lbreakout2`) get `SDL_VIDEODRIVER=kmsdrm`. `FREE_GAMES`
 skip the OTP keypad; everything else needs a TOTP code (or the emergency
 code). Snake is built-in (R button speeds it up; end score gets a speed
-multiplier). Install extras: `sudo apt install -y vitetris nettoe`.
+multiplier). Snake and Noughts & Crosses are built-in curses games
+(`run_snake`, `run_noughts`) that read `input_queue`, so the controller, CEC
+and the Apple remote all drive them. Tetris is `vitetris` (its own menu has
+1- and 2-player). Install extras: `sudo apt install -y vitetris`. `run_game`
+logs each game's exit code and duration to `/tmp/pitv.log` (an instant
+`rc!=0` = crash-on-launch).
 
 ## Screen mirroring
 

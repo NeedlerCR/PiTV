@@ -157,7 +157,6 @@ GAME_KEYS = {
     "INVADERS":   ["ninvaders"],
     "BREAKOUT":   ["lbreakout2"],
     "SHOOTER":    ["chromium-bsu"],
-    "TICTACTOE":  ["nettoe"],           # 1-2 player Noughts & Crosses (nettoe pkg)
 }
 
 # (label, cmd_list, game_key, is_2player)
@@ -167,7 +166,7 @@ GAME_OPTIONS = [
     ("SPACE INVADERS",    ["ninvaders"],      "INVADERS",  False),
     ("BREAKOUT",          ["lbreakout2"],     "BREAKOUT",  False),
     ("SPACE SHOOTER",     ["chromium-bsu"],   "SHOOTER",   False),
-    ("NOUGHTS & CROSSES", ["nettoe"],         "TICTACTOE", True),
+    ("NOUGHTS & CROSSES", ["noughts"],        "TICTACTOE", True),   # built-in
 ]
 
 # Debian's bsdgames/bastet/etc packages install into /usr/games, but the
@@ -691,7 +690,6 @@ def run_game(stdscr, cmd_list: list):
             "lbreakout2":     "lbreakout2",
             "chromium-bsu":   "chromium-bsu",
             "vitetris":       "vitetris",
-            "nettoe":         "nettoe",
         }.get(binary, binary)
         msg = [
             "GAME NOT INSTALLED",
@@ -951,6 +949,113 @@ def run_snake(stdscr):
         input_queue.clear()
         stdscr.clear()
         log(f"Snake: stop (apples {apples}, speed {speed_lvl}, score {final})")
+
+
+def run_noughts(stdscr):
+    """Built-in 2-player Noughts & Crosses (hotseat: X then O).
+
+    Like Snake it reads the shared input_queue, so the controller, the CEC
+    remote AND the Apple Home / Control-Centre remote all drive it — no
+    external binary, so nothing to install or crash.
+    """
+    global controller_mode
+    log("Noughts & Crosses: start")
+    controller_mode = "GAME_INTERNAL"
+    input_queue.clear()
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+
+    board  = [""] * 9
+    cur    = 4
+    turn   = "X"
+    winner = None
+    LINES  = [(0,1,2),(3,4,5),(6,7,8),(0,3,6),(1,4,7),(2,5,8),(0,4,8),(2,4,6)]
+
+    def check():
+        for a, b, c in LINES:
+            if board[a] and board[a] == board[b] == board[c]:
+                return board[a]
+        return "draw" if all(board) else None
+
+    try:
+        while True:
+            try:
+                ch = stdscr.getch()
+                if ch != -1:
+                    if   ch == curses.KEY_UP:     input_queue.append("UP")
+                    elif ch == curses.KEY_DOWN:   input_queue.append("DOWN")
+                    elif ch == curses.KEY_LEFT:   input_queue.append("LEFT")
+                    elif ch == curses.KEY_RIGHT:  input_queue.append("RIGHT")
+                    elif ch in (10, 13, ord(" ")): input_queue.append("SELECT")
+                    elif ch in (27, ord("q")):    input_queue.append("BACK")
+            except curses.error:
+                pass
+
+            quit_game = False
+            while input_queue:
+                cmd = input_queue.pop(0)
+                if cmd in ("BACK", "HOME"):
+                    quit_game = True
+                    break
+                if winner:
+                    if cmd == "SELECT":          # play again
+                        board = [""] * 9; cur = 4; turn = "X"; winner = None
+                    continue
+                r, c = cur // 3, cur % 3
+                if   cmd == "UP"    and r > 0: cur -= 3
+                elif cmd == "DOWN"  and r < 2: cur += 3
+                elif cmd == "LEFT"  and c > 0: cur -= 1
+                elif cmd == "RIGHT" and c < 2: cur += 1
+                elif cmd == "SELECT" and not board[cur]:
+                    board[cur] = turn
+                    winner = check()
+                    if not winner:
+                        turn = "O" if turn == "X" else "X"
+            if quit_game:
+                break
+
+            # ── Render ──
+            stdscr.erase()
+            max_y, max_x = stdscr.getmaxyx()
+            oy, ox = max_y // 2 - 3, max_x // 2 - 5
+
+            def put(y, x, s, a=0):
+                try: stdscr.addstr(y, x, s, a)
+                except curses.error: pass
+
+            title = "NOUGHTS & CROSSES"
+            put(oy - 2, max(0, (max_x - len(title)) // 2), title,
+                curses.color_pair(2) | curses.A_BOLD)
+            for r in range(3):
+                for c in range(3):
+                    i = r * 3 + c
+                    y, x = oy + r * 2, ox + c * 4
+                    a = curses.A_BOLD
+                    if i == cur and not winner:
+                        a |= curses.A_REVERSE
+                    if   board[i] == "X": a |= curses.color_pair(5)
+                    elif board[i] == "O": a |= curses.color_pair(1)
+                    put(y, x, f" {board[i] or ' '} ", a)
+                    if c < 2: put(y, x + 3, "|")
+                if r < 2:
+                    put(oy + r * 2 + 1, ox, "-----------")
+
+            if winner == "draw":
+                msg = " Draw!   A/SELECT: play again    B/BACK: quit "
+            elif winner:
+                msg = f" {winner} wins!   A/SELECT: play again    B/BACK: quit "
+            else:
+                msg = (f" Turn: {turn}    D-pad/Stick: move    A/SELECT: place"
+                       f"    B/BACK: quit ")
+            put(max_y - 1, 0, msg.center(max_x - 1),
+                curses.A_REVERSE | curses.A_DIM)
+            stdscr.refresh()
+            time.sleep(0.02)
+    finally:
+        controller_mode = "MENU"
+        input_queue.clear()
+        stdscr.clear()
+        log("Noughts & Crosses: stop")
 
 
 def run_mirror(stdscr):
@@ -1296,7 +1401,7 @@ def draw_games_menu(stdscr, sel):
         tags = (["FREE"] if key in FREE_GAMES else ["LOCK"])
         if is2p: tags.append("2P")
         # SNAKE is built-in (no external binary), so it's never "N/A".
-        if key != "SNAKE" and not resolve_binary(GAME_KEYS.get(key, [key])[0]):
+        if key not in ("SNAKE", "TICTACTOE") and not resolve_binary(GAME_KEYS.get(key, [key])[0]):
             tags.append("N/A")
         return "  [" + "/".join(tags) + "]"
 
@@ -1527,6 +1632,8 @@ def main(stdscr):
                     game_key = payload.strip().upper()
                     if game_key == "SNAKE":
                         run_snake(stdscr)
+                    elif game_key == "TICTACTOE":
+                        run_noughts(stdscr)
                     else:
                         gc = GAME_KEYS.get(game_key)
                         if gc: run_game(stdscr, gc)
@@ -1593,6 +1700,9 @@ def main(stdscr):
                     label, game_cmd, game_key, _ = GAME_OPTIONS[selected_game_idx]
                     if game_key == "SNAKE":
                         run_snake(stdscr)
+                        current_view = "GAMES_MENU"
+                    elif game_key == "TICTACTOE":
+                        run_noughts(stdscr)
                         current_view = "GAMES_MENU"
                     elif game_key in FREE_GAMES:
                         run_game(stdscr, game_cmd)
