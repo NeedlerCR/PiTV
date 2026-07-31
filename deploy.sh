@@ -12,7 +12,7 @@ sudo mkdir -p /opt/pitv
 
 # Safely copy scripts, configs, and service files (skipping hidden folders like .git)
 sudo cp -f *.sh *.py *.service /opt/pitv/ 2>/dev/null || true
-sudo cp -f .gitignore /opt/pitv/ 2>/dev/null || true
+sudo cp -f .gitignore VERSION /opt/pitv/ 2>/dev/null || true
 
 # Copy the Homebridge TV plugin folder AND reinstall it into Homebridge.
 # npm copies the plugin at install time, so refreshing /opt/pitv alone doesn't

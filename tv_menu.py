@@ -22,6 +22,9 @@ try:
 except ImportError:
     EVDEV_OK = False
 
+# ChronosVer: vYYYY.MAJOR.MINOR.BUG
+VERSION = "v2026.2.1.0"
+
 # ─────────────────────────────────────────────────────────────────────
 # LOG SYSTEM
 # ─────────────────────────────────────────────────────────────────────
@@ -144,6 +147,8 @@ otp_fail_count  = 0
 system_locked   = False
 lock_entered    = ""
 lock_error      = ""
+lock_fail_count = 0        # wrong tries on the lockout screen
+hard_locked     = False    # escalated: emergency code failed 3x → full lockdown
 
 # Controller scan trigger
 _controller_scan_event = threading.Event()
@@ -472,6 +477,15 @@ def listen_fifo():
                         _run_cec_cmd("on 0" if cmd == "TV_ON" else "standby 0")
                         continue
 
+                    # `screen unlock authorise <code>` clears a hard lockdown.
+                    if cmd.startswith("UNLOCK "):
+                        code = raw.split(" ", 1)[1].strip() if " " in raw else ""
+                        if code == EMERGENCY_CODE and hard_locked:
+                            _clear_hardlock()
+                        else:
+                            log("UNLOCK rejected")
+                        continue
+
                     log(f"FIFO: {raw[:60]}")
 
                     if cmd in ("UP","DOWN","LEFT","RIGHT","SELECT","BACK","CLEAR","HOME"):
@@ -622,6 +636,43 @@ def _set_kill_switch(on):
     else:
         _kill_stop.set()
         log("Kill switch OFF")
+
+
+_hardlock_stop = threading.Event()
+
+
+def _start_hardlock():
+    """Escalated lockdown (emergency code failed 3x): force the TV off every
+    7 s and block the screen. Only `screen unlock authorise <code>` clears it."""
+    global hard_locked
+    if hard_locked:
+        return
+    hard_locked = True
+    _hardlock_stop.clear()
+
+    def _loop():
+        while not _hardlock_stop.is_set():
+            _run_cec_cmd("standby 0")          # kill switch: force TV off
+            _hardlock_stop.wait(7)
+    threading.Thread(target=_loop, daemon=True).start()
+    log("HARD LOCK engaged — TV forced off every 7s, screen blocked")
+
+
+def _clear_hardlock():
+    """`screen unlock authorise <code>`: end the lockdown — kill switch off,
+    TV on, input -> PiTV, back to the menu."""
+    global hard_locked, system_locked, otp_fail_count, lock_fail_count
+    global lock_entered, lock_error, current_view
+    _hardlock_stop.set()
+    _set_kill_switch(False)
+    hard_locked    = False
+    system_locked  = False
+    otp_fail_count = lock_fail_count = 0
+    lock_entered   = lock_error = ""
+    _run_cec_cmd("on 0")
+    _run_cec_cmd("tx 1f:82:20:00")             # switch to PiTV (HDMI 2)
+    current_view = "MENU"
+    log("Authorised — hard lock cleared, TV on, input PiTV")
 
 
 _remote_ui       = None
@@ -1582,6 +1633,29 @@ def draw_duration_menu(stdscr, art_label, sel):
     )
 
 
+def draw_hardlock(stdscr):
+    """Full-screen lockdown block. Cleared only by
+    `screen unlock authorise <emergency code>` over SSH."""
+    max_y, max_x = stdscr.getmaxyx()
+    stdscr.erase()
+    lines = [
+        "SYSTEM LOCKED DOWN",
+        "",
+        "Too many failed unlock attempts.",
+        "The TV is being held off.",
+        "",
+        "An administrator must run this over SSH:",
+        "screen unlock authorise <emergency code>",
+    ]
+    start = max(0, (max_y - len(lines)) // 2)
+    for i, ln in enumerate(lines):
+        attr = curses.color_pair(1) | (curses.A_BOLD if i == 0 else 0)
+        try:
+            stdscr.addstr(start + i, max(0, (max_x - len(ln)) // 2), ln, attr)
+        except curses.error:
+            pass
+
+
 def draw_keypad(stdscr, game_name, entered, error, is_lock=False):
     """On-screen numpad. D-pad/joystick move, A enters, B deletes/back."""
     global keypad_row, keypad_col, lock_entered
@@ -1671,6 +1745,7 @@ def main(stdscr):
     global lock_entered, lock_error
     global pending_game_key, pending_game_cmd
     global otp_fail_count, system_locked, log_visible
+    global lock_fail_count, hard_locked
     global controller_mode
 
     curses.curs_set(0)
@@ -1744,6 +1819,12 @@ def main(stdscr):
         while input_queue:
             cmd = input_queue.pop(0)
 
+            # ── Hard lockdown: ignore all input; only `screen unlock
+            # authorise <code>` (over the FIFO) can clear it. ──
+            if hard_locked:
+                current_view = "HARDLOCK"
+                continue
+
             # ── System locked: only unlock keypad works ──────────────
             if system_locked:
                 if current_view != "LOCKED":
@@ -1768,12 +1849,17 @@ def main(stdscr):
                         who = verify_pin(entered)
                         if who:
                             system_locked = False
-                            otp_fail_count = 0
+                            otp_fail_count = lock_fail_count = 0
                             log(f"System unlocked by {who}")
                             current_view = "MENU"
                         else:
                             lock_error   = "WRONG PIN"
                             lock_entered = ""
+                            lock_fail_count += 1
+                            # 3 failed unlock attempts → full lockdown.
+                            if lock_fail_count >= OTP_MAX_FAILS:
+                                _start_hardlock()
+                                current_view = "HARDLOCK"
                 # All other commands (HOME, CLEAR, etc.) are ignored while locked
                 continue
 
@@ -1922,7 +2008,10 @@ def main(stdscr):
         if current_view in ("MENU","DURATION_SELECT","GAMES_MENU","CLEAR","LOCKED"):
             stdscr.erase()
 
-        if system_locked or current_view == "LOCKED":
+        if hard_locked:
+            draw_hardlock(stdscr)
+
+        elif system_locked or current_view == "LOCKED":
             draw_keypad(stdscr, "", lock_entered, lock_error, is_lock=True)
 
         elif current_view == "MENU":

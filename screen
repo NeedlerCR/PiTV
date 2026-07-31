@@ -26,10 +26,15 @@ Controller:
   screen controller        scan for Bluetooth controller (60 seconds)
 
 Player PINs (unlock locked games; the log records who played):
-  screen pin assign <name>       create/show a person's PIN
-  screen pin list                list everyone's PIN
-  screen pin remove <name>       delete a person's PIN
-  screen pin rename <old> <new>  rename a person
+  screen pin assign <name>              create/show a person's PIN
+  screen pin assign <name> custom <pin> set a specific 6-digit PIN
+  screen pin list                       list everyone's PIN
+  screen pin remove <name>              delete a person's PIN
+  screen pin rename <old> <new>         rename a person
+
+System:
+  screen version                        show the PiTV version
+  screen unlock authorise <code>        clear a full lockdown
 
 SSH keyboard remote:
   screen remote on         interactive forwarder (ESC to exit)
@@ -81,6 +86,20 @@ case "$CMD" in
     pin)
         shift
         exec python3 /opt/pitv/pin-admin.py "$@"
+        ;;
+
+    version)
+        cat /opt/pitv/VERSION 2>/dev/null || echo "unknown"
+        ;;
+
+    unlock)
+        if [[ "${2:-}" == "authorise" && -n "${3:-}" ]]; then
+            _send_raw "UNLOCK ${3}"
+            echo "Authorisation sent."
+        else
+            echo "Usage: screen unlock authorise <emergency code>" >&2
+            exit 1
+        fi
         ;;
 
     fire|clock|matrix)

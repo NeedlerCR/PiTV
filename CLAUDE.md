@@ -4,6 +4,14 @@ A Raspberry Pi Zero 2 W wired to a TV that boots straight into a full-screen
 curses menu (screensavers, retro games, AirPlay screen mirroring) and exposes
 the TV's power to Apple HomeKit over HDMI-CEC.
 
+Versioning is **ChronosVer** (`vYYYY.MAJOR.MINOR.BUG`); the canonical value is
+in `VERSION` (and `tv_menu.py`'s `VERSION`), shown by `screen version`.
+
+Security escalation: 3 wrong game PINs → lockout keypad; 3 wrong tries there →
+**full lockdown** (`hard_locked`): the TV is forced off every 7 s and the
+screen is blocked. Only `screen unlock authorise <emergency code>` clears it
+(kill switch off, TV on, input → PiTV).
+
 ## Git settings
 
 - Git author + Commitor + anything else: NeedlerCR <jackdaw.juncos-8n@icloud.com>

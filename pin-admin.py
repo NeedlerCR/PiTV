@@ -66,10 +66,27 @@ def main() -> None:
         show(d)
 
     elif cmd == "assign":
-        if len(args) < 2:
-            print("Usage: screen pin assign <name>"); sys.exit(1)
-        name = " ".join(args[1:])
-        pin  = d.get(name) or new_pin(d)
+        rest = args[1:]
+        custom_pin = None
+        if "custom" in rest:                       # assign <name> custom <pin>
+            ci = rest.index("custom")
+            name = " ".join(rest[:ci])
+            custom_pin = rest[ci + 1] if len(rest) > ci + 1 else ""
+        else:
+            name = " ".join(rest)
+        if not name:
+            print("Usage: screen pin assign <name> [custom <pin>]"); sys.exit(1)
+        if custom_pin is not None:
+            if not (custom_pin.isdigit() and len(custom_pin) == 6):
+                print("Custom PIN must be exactly 6 digits."); sys.exit(1)
+            if custom_pin == EMERGENCY_CODE:
+                print("That PIN is reserved (emergency code)."); sys.exit(1)
+            clash = next((n for n, p in d.items() if p == custom_pin and n != name), None)
+            if clash:
+                print(f"PIN already used by {clash}."); sys.exit(1)
+            pin = custom_pin
+        else:
+            pin = d.get(name) or new_pin(d)
         d[name] = pin
         save(d)
         print(f"- {name}: {pin}")
