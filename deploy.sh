@@ -35,8 +35,11 @@ fi
 # Reload systemd services
 echo "Reloading systemd service..."
 sudo cp pitv-menu.service /etc/systemd/system/
+sudo cp pitv-guest.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl restart pitv-menu.service
+sudo systemctl enable pitv-guest.service 2>/dev/null || true
+sudo systemctl restart pitv-guest.service
 
 echo "----------------------------------------"
 echo "Deploy complete! All files synced to /opt/pitv/"

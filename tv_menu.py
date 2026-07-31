@@ -757,6 +757,15 @@ def listen_cec_udp():
                 _run_cec_cmd("on 0" if up == "TV_ON" else "standby 0")
             elif up in ("KILL_ON", "KILL_OFF"):
                 _set_kill_switch(up == "KILL_ON")
+            elif up in ("GUEST_ON", "GUEST_OFF"):
+                # Gate the guest web portal (it reads this file).
+                state = "on" if up == "GUEST_ON" else "off"
+                log(f"Guest mode -> {state}")
+                try:
+                    with open("/tmp/pitv-guest-mode", "w") as f:
+                        f.write(state)
+                except OSError:
+                    pass
             elif up.startswith("KEY "):
                 tok = up[4:].strip()
                 if tok == "HOME":
@@ -1662,7 +1671,7 @@ def draw_keypad(stdscr, game_name, entered, error, is_lock=False):
     max_y, max_x = stdscr.getmaxyx()
     stdscr.erase()
 
-    title = "SYSTEM LOCKED — ENTER A PIN" if is_lock else f"ENTER PIN: {game_name}"
+    title = "SYSTEM LOCKED — ENTER EMERGENCY CODE" if is_lock else f"ENTER PIN: {game_name}"
     color = curses.color_pair(1) if is_lock else curses.color_pair(5)
     try:
         stdscr.addstr(1, max(0,(max_x-len(title))//2), title, color|curses.A_BOLD)
@@ -1846,14 +1855,15 @@ def main(stdscr):
                     key = KEYPAD_LAYOUT[keypad_row][keypad_col]
                     entered, verify = keypad_press(key, "LOCK")
                     if verify:
-                        who = verify_pin(entered)
-                        if who:
+                        # A lockout is cleared ONLY by the emergency code —
+                        # not by an ordinary player PIN.
+                        if entered == EMERGENCY_CODE:
                             system_locked = False
                             otp_fail_count = lock_fail_count = 0
-                            log(f"System unlocked by {who}")
+                            log("System unlocked via emergency code")
                             current_view = "MENU"
                         else:
-                            lock_error   = "WRONG PIN"
+                            lock_error   = "WRONG CODE"
                             lock_entered = ""
                             lock_fail_count += 1
                             # 3 failed unlock attempts → full lockdown.

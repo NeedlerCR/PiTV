@@ -67,10 +67,12 @@ class PiTVTelevisionPlatform {
     this.active      = 0;    // Characteristic.Active.INACTIVE
     this.activeInput = 1;
     this.killOn      = false;
+    this.guestOn     = false;
 
     this.api.on('didFinishLaunching', () => {
       this.publishTelevision();
       this.ensureKillSwitch();
+      this.ensureGuestSwitch();
     });
   }
 
@@ -234,5 +236,27 @@ class PiTVTelevisionPlatform {
         this.send(value ? 'KILL_ON' : 'KILL_OFF');
       });
     this.log.info(`Kill switch "${name}" ready.`);
+  }
+
+  // Bridged Switch: gates the guest web portal (on :8080).
+  ensureGuestSwitch() {
+    const name = 'Guest Mode';
+    const uuid = this.api.hap.uuid.generate(`${PLUGIN_NAME}:guestmode`);
+    let acc = this.accessories.find((a) => a.UUID === uuid);
+    if (!acc) {
+      acc = new this.api.platformAccessory(name, uuid);
+      acc.addService(Service.Switch, name);
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [acc]);
+      this.accessories.push(acc);
+    }
+    const svc = acc.getService(Service.Switch)
+      || acc.addService(Service.Switch, name);
+    svc.getCharacteristic(Characteristic.On)
+      .onGet(() => this.guestOn)
+      .onSet((value) => {
+        this.guestOn = value;
+        this.send(value ? 'GUEST_ON' : 'GUEST_OFF');
+      });
+    this.log.info(`Guest Mode switch ready.`);
   }
 }

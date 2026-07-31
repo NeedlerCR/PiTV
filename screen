@@ -36,6 +36,12 @@ System:
   screen version                        show the PiTV version
   screen unlock authorise <code>        clear a full lockdown
 
+Guest web portal (port 8080, only when Home 'Guest Mode' is on):
+  screen guest password set <name> <pw> create/update a guest login
+  screen guest list                     list guests + their NFC links
+  screen guest remove <name>            delete a guest
+  screen pin guest rotate all           fresh player PINs for all guests
+
 SSH keyboard remote:
   screen remote on         interactive forwarder (ESC to exit)
   screen remote off        kill a background remote session
@@ -85,7 +91,16 @@ case "$CMD" in
 
     pin)
         shift
+        # `screen pin guest rotate all` rotates all guest PINs.
+        if [[ "${1:-}" == "guest" && "${2:-}" == "rotate" ]]; then
+            exec python3 /opt/pitv/guest-admin.py rotate
+        fi
         exec python3 /opt/pitv/pin-admin.py "$@"
+        ;;
+
+    guest)
+        shift
+        exec python3 /opt/pitv/guest-admin.py "$@"
         ;;
 
     version)

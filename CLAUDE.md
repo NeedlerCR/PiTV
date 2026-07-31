@@ -94,6 +94,20 @@ polls so the physical remote is reflected in the Home app.
 time, so refreshing `/opt/pitv` alone isn't enough).
 (`tv-state.sh` was the older homebridge-cmd4 approach and is superseded.)
 
+## Guest web portal
+
+`guest-portal.py` (stdlib `http.server`, run by `pitv-guest.service` on port
+**8080**) lets guests on the Wi-Fi control TV power + HDMI input and drive the
+menu via an on-screen **D-pad** — but ONLY while the Home **Guest Mode** switch
+is ON. The plugin's Guest Mode switch sends `GUEST_ON`/`GUEST_OFF` over the 8129
+UDP channel; `tv_menu` writes `/tmp/pitv-guest-mode`, which the portal reads.
+Guests sign in with a password (`screen guest password set <user> <pw>`) or an
+NFC link `/nfc?t=<token>` (1-week HMAC-signed cookie that redirects to hide the
+URL), see their assigned player PIN (rotates weekly or via
+`screen pin guest rotate all`), and cannot use the kill switch or admin.
+Actuation: TV/input via the 8129 UDP channel, menu nav by writing the FIFO.
+Data lives in `~/.pitv/guests.json` + `~/.pitv/pins.json` (device-only).
+
 ## Secrets — never commit
 
 The Homebridge PIN, the player PINs (`~/.pitv/pins.json`), and the emergency

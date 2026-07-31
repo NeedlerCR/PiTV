@@ -1,0 +1,17 @@
+[Unit]
+Description=PiTV Guest Web Portal (port 8080)
+After=network-online.target pitv-menu.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=charlieneedler
+Group=charlieneedler
+Environment=HOME=/home/charlieneedler
+WorkingDirectory=/opt/pitv
+ExecStart=/usr/bin/python3 /opt/pitv/guest-portal.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
