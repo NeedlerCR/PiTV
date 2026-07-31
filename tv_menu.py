@@ -91,22 +91,19 @@ def verify_pin(code: str):
 
 
 def set_highscore_name(binary: str, who: str) -> None:
-    """Best-effort: make a game's high-score name the PIN owner's name instead
-    of a stale default. Safe if the config is missing or the key differs (it
-    just changes nothing). Currently handles lbreakout2 (Breakout)."""
+    """Make a game's high-score name the PIN owner's name instead of a stale
+    default. Safe if the config is missing (does nothing). Handles lbreakouthd
+    (Breakout), whose config is key=value with the active player on `player0=`."""
     name = "".join(c for c in who if c.isalnum())[:14] or "PLAYER"
-    if binary == "lbreakout2":
-        cfg = os.path.expanduser("~/.lbreakout2/config")
+    if binary in ("lbreakouthd", "lbreakout2"):
+        cfg = os.path.expanduser("~/.lbreakouthd/lbreakouthd.conf")
         try:
             if not os.path.isfile(cfg):
                 return
             out, changed = [], False
             for ln in open(cfg).read().splitlines():
-                low = ln.lstrip().lower()
-                if low.startswith(("playername", "player_name", "player ",
-                                   "name ", "hero ")):
-                    key = ln.split(None, 1)[0]
-                    out.append(f"{key} {name}")
+                if ln.startswith("player0="):
+                    out.append(f"player0={name}")
                     changed = True
                 else:
                     out.append(ln)
@@ -191,7 +188,7 @@ GAME_KEYS = {
     "SNAKE":      ["snake"],
     "TETRIS":     ["vitetris"],         # normal Tetris; its menu also has 2-player
     "INVADERS":   ["ninvaders"],
-    "BREAKOUT":   ["lbreakout2"],
+    "BREAKOUT":   ["lbreakouthd"],
     "SHOOTER":    ["chromium-bsu"],
 }
 
@@ -200,7 +197,7 @@ GAME_OPTIONS = [
     ("SNAKE",             ["snake"],          "SNAKE",     False),
     ("TETRIS",            ["vitetris"],       "TETRIS",    True),
     ("SPACE INVADERS",    ["ninvaders"],      "INVADERS",  False),
-    ("BREAKOUT",          ["lbreakout2"],     "BREAKOUT",  False),
+    ("BREAKOUT",          ["lbreakouthd"],    "BREAKOUT",  False),
     ("SPACE SHOOTER",     ["chromium-bsu"],   "SHOOTER",   False),
     ("NOUGHTS & CROSSES", ["noughts"],        "TICTACTOE", True),   # built-in
 ]
@@ -494,7 +491,9 @@ def listen_fifo():
 
 
 TV_STATE_FILE  = "/tmp/pitv-tv-state"
+TV_INPUT_FILE  = "/tmp/pitv-tv-input"
 tv_power_state = "unknown"
+tv_input_phys  = None
 
 
 def _set_tv_power(state):
@@ -508,6 +507,22 @@ def _set_tv_power(state):
     try:
         with open(TV_STATE_FILE, "w") as f:
             f.write(state)
+    except OSError:
+        pass
+
+
+def _set_tv_input(phys):
+    """Record the TV's active input (physical address like '10:00') from CEC
+    Active-Source traffic, so the Home app's input selection tracks reality —
+    otherwise re-picking the input HomeKit already thinks is active does
+    nothing, and you have to toggle back and forth."""
+    global tv_input_phys
+    if phys != tv_input_phys:
+        tv_input_phys = phys
+        log(f"TV input -> {phys}")
+    try:
+        with open(TV_INPUT_FILE, "w") as f:
+            f.write(phys)
     except OSError:
         pass
 
@@ -549,6 +564,11 @@ def listen_cec_remote():
                     elif "on" in low:      _set_tv_power("on")
                 elif ":90:00" in low:      _set_tv_power("on")    # report power: on
                 elif ":90:01" in low:      _set_tv_power("off")   # report power: standby
+                else:
+                    # Active Source (opcode 0x82) tells us the current input.
+                    m = re.search(r":82:([0-9a-f]{2}:[0-9a-f]{2})", low)
+                    if m:
+                        _set_tv_input(m.group(1))
             proc.wait()
         except Exception:
             pass
@@ -824,7 +844,7 @@ def run_game(stdscr, cmd_list: list):
         pkg_hint = {
             "snake":          "bsdgames",
             "ninvaders":      "ninvaders",
-            "lbreakout2":     "lbreakout2",
+            "lbreakouthd":    "lbreakouthd",
             "chromium-bsu":   "chromium-bsu",
             "vitetris":       "vitetris",
         }.get(binary, binary)
@@ -851,7 +871,7 @@ def run_game(stdscr, cmd_list: list):
     _reset_terminal()
     os.system("clear")
 
-    SDL_GAMES = {"chromium-bsu", "lbreakout2"}
+    SDL_GAMES = {"chromium-bsu", "lbreakouthd"}
     is_sdl    = binary in SDL_GAMES
 
     # Controller-to-keys mapper. SDL games on the console also read the

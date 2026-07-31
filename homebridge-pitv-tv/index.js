@@ -28,6 +28,9 @@ const CEC_UDP_PORT  = 8129;
 // tv_menu.py writes the TV's real power state here (updated from CEC, so it
 // reflects the physical remote too). We read it to keep the Home tile in sync.
 const TV_STATE_FILE = '/tmp/pitv-tv-state';
+// tv_menu.py writes the TV's active input (CEC physical address like "10:00")
+// here, so the Home app's input selection reflects reality.
+const TV_INPUT_FILE = '/tmp/pitv-tv-input';
 
 // Broadcast "Active Source = <physical address>" so the TV switches input.
 // Initiator "1" = the Pi's CEC logical address (libcec registers as Recorder 1
@@ -129,15 +132,36 @@ class PiTVTelevisionPlatform {
       }
     }, 4000);
 
-    // Input switching. Selecting an input sends its CEC frame.
-    tvService.getCharacteristic(Characteristic.ActiveIdentifier)
-      .onGet(() => this.activeInput)
+    // Input switching. Selecting an input sends its CEC frame; onGet/poll
+    // track the TV's REAL active input (from CEC) so re-selecting works and the
+    // tile doesn't drift out of sync.
+    const physOf = (cec) => {
+      const m = /82:([0-9a-f]{2}:[0-9a-f]{2})/i.exec(cec || '');
+      return m ? m[1].toLowerCase() : null;
+    };
+    const readInput = () => {
+      let phys;
+      try { phys = fs.readFileSync(TV_INPUT_FILE, 'utf8').trim().toLowerCase(); }
+      catch (e) { return null; }
+      const idx = this.inputs.findIndex((inp) => physOf(inp.cec) === phys);
+      return idx >= 0 ? idx + 1 : null;
+    };
+    const activeIdChar = tvService.getCharacteristic(Characteristic.ActiveIdentifier)
+      .onGet(() => { const i = readInput(); return i === null ? this.activeInput : i; })
       .onSet((id) => {
         this.activeInput = id;
         const inp = this.inputs[id - 1];
         if (inp && inp.cec) this.send(`CEC ${inp.cec}`);
       });
     tvService.setCharacteristic(Characteristic.ActiveIdentifier, this.activeInput);
+    setInterval(() => {
+      const i = readInput();
+      if (i !== null && i !== this.activeInput) {
+        this.activeInput = i;
+        activeIdChar.updateValue(i);
+        this.log.info(`TV input changed externally -> ${i}`);
+      }
+    }, 4000);
 
     this.inputs.forEach((inp, i) => {
       const id  = i + 1;
