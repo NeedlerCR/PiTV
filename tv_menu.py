@@ -90,6 +90,34 @@ def verify_pin(code: str):
     return None
 
 
+def set_highscore_name(binary: str, who: str) -> None:
+    """Best-effort: make a game's high-score name the PIN owner's name instead
+    of a stale default. Safe if the config is missing or the key differs (it
+    just changes nothing). Currently handles lbreakout2 (Breakout)."""
+    name = "".join(c for c in who if c.isalnum())[:14] or "PLAYER"
+    if binary == "lbreakout2":
+        cfg = os.path.expanduser("~/.lbreakout2/config")
+        try:
+            if not os.path.isfile(cfg):
+                return
+            out, changed = [], False
+            for ln in open(cfg).read().splitlines():
+                low = ln.lstrip().lower()
+                if low.startswith(("playername", "player_name", "player ",
+                                   "name ", "hero ")):
+                    key = ln.split(None, 1)[0]
+                    out.append(f"{key} {name}")
+                    changed = True
+                else:
+                    out.append(ln)
+            if changed:
+                with open(cfg, "w") as f:
+                    f.write("\n".join(out) + "\n")
+                log(f"Breakout high-score name set to {name}")
+        except Exception as e:
+            log(f"set_highscore_name error: {e}")
+
+
 # ─────────────────────────────────────────────────────────────────────
 # GLOBAL STATE
 # ─────────────────────────────────────────────────────────────────────
@@ -1800,6 +1828,9 @@ def main(stdscr):
                         if who:
                             otp_fail_count = 0
                             log(f"{pending_game_key} unlocked by {who}")
+                            set_highscore_name(pending_game_cmd[0], who)
+                            show_message(stdscr, ["", f"Welcome {who}!"],
+                                         color_pair=2, duration=1.5)
                             if pending_game_key == "SNAKE":
                                 run_snake(stdscr)
                             elif pending_game_key == "TICTACTOE":
