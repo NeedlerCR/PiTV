@@ -614,7 +614,7 @@ def _set_kill_switch(on):
         def _loop():
             while not _kill_stop.is_set():
                 _run_cec_cmd("standby 0")
-                _kill_stop.wait(15)
+                _kill_stop.wait(7)
 
         _kill_thread = threading.Thread(target=_loop, daemon=True)
         _kill_thread.start()
