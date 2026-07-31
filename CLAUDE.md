@@ -79,6 +79,11 @@ feeding `input_queue`). UDP is used because the official Homebridge service is
 sandboxed (`ProtectSystem=strict`) and can't write a `/tmp` FIFO, but it can
 always send a localhost packet. `tv_menu.py` owns the CEC bus and runs
 `cec-cmd.sh` itself with output suppressed (so it never scribbles on the menu).
+Power state is bidirectional: `listen_cec_remote` polls the TV's CEC power
+status and writes `on`/`off` to `/tmp/pitv-tv-state`, which the plugin reads +
+polls so the physical remote is reflected in the Home app.
+`deploy.sh` reinstalls the plugin into Homebridge (npm copies it at install
+time, so refreshing `/opt/pitv` alone isn't enough).
 (`tv-state.sh` was the older homebridge-cmd4 approach and is superseded.)
 
 ## Secrets — never commit

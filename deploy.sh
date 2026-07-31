@@ -14,9 +14,16 @@ sudo mkdir -p /opt/pitv
 sudo cp -f *.sh *.py *.service /opt/pitv/ 2>/dev/null || true
 sudo cp -f .gitignore /opt/pitv/ 2>/dev/null || true
 
-# Copy the Homebridge TV plugin folder (installed separately via npm — see CLAUDE.md)
+# Copy the Homebridge TV plugin folder AND reinstall it into Homebridge.
+# npm copies the plugin at install time, so refreshing /opt/pitv alone doesn't
+# update the running plugin — Homebridge must reinstall it from that path.
 if [ -d homebridge-pitv-tv ]; then
     sudo cp -rf homebridge-pitv-tv /opt/pitv/
+    if command -v hb-service >/dev/null 2>&1; then
+        echo "Reinstalling Homebridge PiTV TV plugin..."
+        sudo hb-service add /opt/pitv/homebridge-pitv-tv 2>/dev/null || true
+        sudo hb-service restart 2>/dev/null || true
+    fi
 fi
 
 # Install the `screen` CLI (no extension, so not caught by the globs above)

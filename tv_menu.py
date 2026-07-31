@@ -493,14 +493,47 @@ def listen_fifo():
             time.sleep(0.2)
 
 
+TV_STATE_FILE  = "/tmp/pitv-tv-state"
+tv_power_state = "unknown"
+
+
+def _set_tv_power(state):
+    """Record the TV's power state and publish it to a file the Homebridge
+    plugin reads, so powering the TV on/off with the PHYSICAL remote shows up
+    in the Home app."""
+    global tv_power_state
+    if state != tv_power_state:
+        tv_power_state = state
+        log(f"TV power -> {state}")
+    try:
+        with open(TV_STATE_FILE, "w") as f:
+            f.write(state)
+    except OSError:
+        pass
+
+
 def listen_cec_remote():
     while True:
         try:
             proc = subprocess.Popen(
                 ["cec-client", "-d", "8"],
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             )
+
+            def _poll_power(p):
+                # Ask the TV its power status every few seconds so a change made
+                # with the physical remote gets noticed.
+                while p.poll() is None:
+                    try:
+                        p.stdin.write("pow 0\n"); p.stdin.flush()
+                    except Exception:
+                        return
+                    time.sleep(5)
+            threading.Thread(target=_poll_power, args=(proc,), daemon=True).start()
+
             for line in iter(proc.stdout.readline, ""):
+                low = line.lower()
                 if "key pressed:" in line:
                     key = line.split("key pressed:")[1].strip().split(" ")[0].lower()
                     log(f"CEC: {key}")
@@ -510,6 +543,12 @@ def listen_cec_remote():
                     elif key == "right":                     input_queue.append("RIGHT")
                     elif key in ("select","enter"):          input_queue.append("SELECT")
                     elif key in ("exit","back","clear","return"): input_queue.append("BACK")
+                # ── TV power state (from the pow poll or the TV's own reports) ──
+                elif "power status:" in low:
+                    if "standby" in low:   _set_tv_power("off")
+                    elif "on" in low:      _set_tv_power("on")
+                elif ":90:00" in low:      _set_tv_power("on")    # report power: on
+                elif ":90:01" in low:      _set_tv_power("off")   # report power: standby
             proc.wait()
         except Exception:
             pass
@@ -643,6 +682,7 @@ def listen_cec_udp():
             up  = msg.upper()
             if up in ("TV_ON", "TV_OFF"):
                 log(f"HomeKit CEC: {up}")
+                _set_tv_power("on" if up == "TV_ON" else "off")
                 _run_cec_cmd("on 0" if up == "TV_ON" else "standby 0")
             elif up in ("KILL_ON", "KILL_OFF"):
                 _set_kill_switch(up == "KILL_ON")

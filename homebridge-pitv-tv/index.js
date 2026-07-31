@@ -19,11 +19,15 @@
 //   KILL_ON | KILL_OFF    -> kill switch
 
 const dgram = require('dgram');
+const fs    = require('fs');
 
 const PLUGIN_NAME   = 'homebridge-pitv-tv';
 const PLATFORM_NAME = 'PiTVTelevision';
 const CEC_UDP_HOST  = '127.0.0.1';
 const CEC_UDP_PORT  = 8129;
+// tv_menu.py writes the TV's real power state here (updated from CEC, so it
+// reflects the physical remote too). We read it to keep the Home tile in sync.
+const TV_STATE_FILE = '/tmp/pitv-tv-state';
 
 // Broadcast "Active Source = <physical address>" so the TV switches input.
 // Initiator "1" = the Pi's CEC logical address (libcec registers as Recorder 1
@@ -101,13 +105,29 @@ class PiTVTelevisionPlatform {
         Characteristic.SleepDiscoveryMode.ALWAYS_DISCOVERABLE,
       );
 
-    // Power on/off — the control on the TV tile.
-    tvService.getCharacteristic(Characteristic.Active)
-      .onGet(() => this.active)
+    // Power on/off — the control on the TV tile. onGet prefers the real CEC
+    // state (which also catches the physical remote); a poll pushes external
+    // changes so the tile updates on its own.
+    const readPower = () => {
+      try {
+        const s = fs.readFileSync(TV_STATE_FILE, 'utf8').trim();
+        return s === 'on' ? 1 : s === 'off' ? 0 : null;
+      } catch (e) { return null; }
+    };
+    const activeChar = tvService.getCharacteristic(Characteristic.Active)
+      .onGet(() => { const p = readPower(); return p === null ? this.active : p; })
       .onSet((value) => {
         this.active = value;
         this.send(value ? 'TV_ON' : 'TV_OFF');
       });
+    setInterval(() => {
+      const p = readPower();
+      if (p !== null && p !== this.active) {
+        this.active = p;
+        activeChar.updateValue(p);
+        this.log.info(`TV power changed externally -> ${p ? 'ON' : 'OFF'}`);
+      }
+    }, 4000);
 
     // Input switching. Selecting an input sends its CEC frame.
     tvService.getCharacteristic(Characteristic.ActiveIdentifier)
