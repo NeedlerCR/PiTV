@@ -1,0 +1,19 @@
+[Unit]
+Description=PiTV Admin Web Portal (port 80)
+After=network-online.target pitv-menu.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=charlieneedler
+Group=charlieneedler
+Environment=HOME=/home/charlieneedler
+WorkingDirectory=/opt/pitv
+# Bind the privileged port 80 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ExecStart=/usr/bin/python3 /opt/pitv/guest-portal.py --admin
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -23,6 +23,7 @@ import sys
 
 PITV_DIR       = os.path.expanduser("~/.pitv")
 GUEST_FILE     = os.path.join(PITV_DIR, "guests.json")
+ADMIN_FILE     = os.path.join(PITV_DIR, "admin.json")
 PIN_FILE       = os.path.join(PITV_DIR, "pins.json")
 EMERGENCY_CODE = "159753"
 
@@ -135,6 +136,40 @@ def cmd_rotate():
         print(f"- {user}: {pins[user]}")
 
 
+def cmd_admin_set(args):
+    # args: [<username>, <password>]
+    if len(args) < 2:
+        print("Usage: screen admin password set <username> <password>"); sys.exit(1)
+    user, password = args[0], args[1]
+    admins = _load(ADMIN_FILE, {})
+    salt = admins.get(user, {}).get("salt") or secrets.token_hex(8)
+    admins[user] = {
+        "salt": salt,
+        "pwhash": hashlib.sha256((salt + password).encode()).hexdigest(),
+    }
+    _save(ADMIN_FILE, admins)
+    print(f"Admin '{user}' set.  Portal: http://{local_ip()}/  (raspberrypi.local)")
+
+
+def cmd_admin_list():
+    admins = _load(ADMIN_FILE, {})
+    if not admins:
+        print("No admins yet.  Add one: screen admin password set <name> <password>")
+        return
+    for user in admins:
+        print(f"- {user}")
+
+
+def cmd_admin_remove(args):
+    if not args:
+        print("Usage: screen admin remove <username>"); sys.exit(1)
+    admins = _load(ADMIN_FILE, {})
+    if admins.pop(args[0], None) is None:
+        print(f"No admin '{args[0]}'."); sys.exit(1)
+    _save(ADMIN_FILE, admins)
+    print(f"Removed admin '{args[0]}'.")
+
+
 def main():
     args = sys.argv[1:]
     cmd = args[0] if args else ""
@@ -146,6 +181,12 @@ def main():
         cmd_remove(args[1:])
     elif cmd == "rotate":
         cmd_rotate()
+    elif cmd == "admin-set":
+        cmd_admin_set(args[1:])
+    elif cmd == "admin-list":
+        cmd_admin_list()
+    elif cmd == "admin-remove":
+        cmd_admin_remove(args[1:])
     else:
         print("Usage: screen guest <password set|list|remove> ...")
         sys.exit(1)

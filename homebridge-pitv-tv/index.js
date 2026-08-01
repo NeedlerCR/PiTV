@@ -251,12 +251,24 @@ class PiTVTelevisionPlatform {
     }
     const svc = acc.getService(Service.Switch)
       || acc.addService(Service.Switch, name);
-    svc.getCharacteristic(Characteristic.On)
-      .onGet(() => this.guestOn)
+    const readGuest = () => {
+      try { return fs.readFileSync('/tmp/pitv-guest-mode', 'utf8').trim() === 'on'; }
+      catch (e) { return null; }
+    };
+    const gsChar = svc.getCharacteristic(Characteristic.On)
+      .onGet(() => { const g = readGuest(); return g === null ? this.guestOn : g; })
       .onSet((value) => {
         this.guestOn = value;
         this.send(value ? 'GUEST_ON' : 'GUEST_OFF');
       });
+    // Reflect the admin web portal's toggle back into Home.
+    setInterval(() => {
+      const g = readGuest();
+      if (g !== null && g !== this.guestOn) {
+        this.guestOn = g;
+        gsChar.updateValue(g);
+      }
+    }, 4000);
     this.log.info(`Guest Mode switch ready.`);
   }
 }

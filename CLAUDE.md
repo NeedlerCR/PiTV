@@ -108,6 +108,13 @@ URL), see their assigned player PIN (rotates weekly or via
 Actuation: TV/input via the 8129 UDP channel, menu nav by writing the FIFO.
 Data lives in `~/.pitv/guests.json` + `~/.pitv/pins.json` (device-only).
 
+The **same `guest-portal.py`** run with `--admin` (`pitv-admin.service`,
+`AmbientCapabilities=CAP_NET_BIND_SERVICE` so it binds **port 80** →
+`http://raspberrypi.local`) is the admin portal: username+password login
+(`screen admin password set <user> <pw>`, hashed in `~/.pitv/admin.json`), the
+same controls, **not** gated by Guest Mode, plus a Guest Mode on/off toggle
+(the plugin polls `/tmp/pitv-guest-mode` so the Home switch stays in sync).
+
 ## Secrets — never commit
 
 The Homebridge PIN, the player PINs (`~/.pitv/pins.json`), and the emergency
