@@ -651,11 +651,15 @@ def _start_hardlock():
     _hardlock_stop.clear()
 
     def _loop():
+        # 15 s grace before enforcement kicks in (if authorised in time,
+        # the TV is never touched).
+        if _hardlock_stop.wait(15):
+            return
         while not _hardlock_stop.is_set():
             _run_cec_cmd("standby 0")          # kill switch: force TV off
             _hardlock_stop.wait(7)
     threading.Thread(target=_loop, daemon=True).start()
-    log("HARD LOCK engaged — TV forced off every 7s, screen blocked")
+    log("HARD LOCK engaged — screen blocked; TV forced off in 15s (then every 7s)")
 
 
 def _clear_hardlock():
