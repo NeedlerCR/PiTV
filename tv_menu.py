@@ -279,14 +279,13 @@ def _handle_controller_event(event) -> None:
             elif c == ecodes.BTN_DPAD_DOWN:  input_queue.append("DOWN")
             elif c == ecodes.BTN_DPAD_LEFT:  input_queue.append("LEFT")
             elif c == ecodes.BTN_DPAD_RIGHT: input_queue.append("RIGHT")
-            elif c == ecodes.BTN_EAST:       # A
-                # Keypad: press the highlighted key. Game: quit.
-                input_queue.append("SELECT" if mode == "KEYPAD" else "BACK")
-            elif c == ecodes.BTN_SOUTH:      # B → back (keypad: delete/exit)
+            elif c == ecodes.BTN_EAST:       # Nintendo A → select/confirm
+                # Keypad: press the highlighted key. Game (e.g. N+C): place mark.
+                input_queue.append("SELECT")
+            elif c == ecodes.BTN_SOUTH:      # Nintendo B → back (keypad: delete/exit)
                 input_queue.append("BACK")
-            elif c in (ecodes.BTN_THUMBL, ecodes.BTN_THUMBR):
-                if mode == "KEYPAD":
-                    input_queue.append("SELECT")
+            elif c in (ecodes.BTN_THUMBL, ecodes.BTN_THUMBR):  # stick click → select
+                input_queue.append("SELECT")
             elif c in (ecodes.BTN_TR, ecodes.BTN_TR2) and mode == "GAME_INTERNAL":
                 input_queue.append("SPEED")   # R button: snake speeds up
             return

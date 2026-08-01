@@ -6,6 +6,9 @@ Converts up to two generic Bluetooth/USB gamepads into keyboard events
 via uinput.  Launched by tv_menu.py before a game starts and terminated
 when the game exits.
 
+  Buttons follow the Nintendo layout (A on the right = BTN_EAST is the
+  primary/confirm button; B on the bottom = BTN_SOUTH is back/quit).
+
   Player 1 (first pad)  -> arrow keys, plus:
         A  -> Space   (fire / start — Space Invaders, hard-drop in Tetris)
         X  -> Enter   (menu confirm — e.g. the bastet difficulty screen)
@@ -50,10 +53,10 @@ PLAYERS = [
         "x": {-1: ecodes.KEY_LEFT, 1: ecodes.KEY_RIGHT},
         "y": {-1: ecodes.KEY_UP,   1: ecodes.KEY_DOWN},
         "buttons": {
-            ecodes.BTN_SOUTH:  ecodes.KEY_SPACE,   # A  -> fire / start / drop
-            ecodes.BTN_EAST:   ecodes.KEY_ESC,     # B  -> back / quit
-            ecodes.BTN_NORTH:  ecodes.KEY_ENTER,   # Y  -> confirm / menu select
-            ecodes.BTN_WEST:   ecodes.KEY_ENTER,   # X  -> confirm / menu select
+            ecodes.BTN_EAST:   ecodes.KEY_SPACE,   # A  -> fire / start / drop
+            ecodes.BTN_SOUTH:  ecodes.KEY_ESC,     # B  -> back / quit
+            ecodes.BTN_NORTH:  ecodes.KEY_ENTER,   # X  -> confirm / menu select
+            ecodes.BTN_WEST:   ecodes.KEY_ENTER,   # Y  -> confirm / menu select
             ecodes.BTN_START:  ecodes.KEY_ENTER,   # +  -> menu select
             ecodes.BTN_SELECT: ecodes.KEY_ESC,     # -  -> back
         },
@@ -62,8 +65,8 @@ PLAYERS = [
         "x": {-1: ecodes.KEY_A, 1: ecodes.KEY_D},
         "y": {-1: ecodes.KEY_W, 1: ecodes.KEY_S},
         "buttons": {
-            ecodes.BTN_SOUTH:  ecodes.KEY_F,       # A  -> player-2 fire / rotate
-            ecodes.BTN_EAST:   ecodes.KEY_G,       # B  -> player-2 secondary
+            ecodes.BTN_EAST:   ecodes.KEY_F,       # A  -> player-2 fire / rotate
+            ecodes.BTN_SOUTH:  ecodes.KEY_G,       # B  -> player-2 secondary
             ecodes.BTN_NORTH:  ecodes.KEY_F,
             ecodes.BTN_WEST:   ecodes.KEY_F,
             ecodes.BTN_START:  ecodes.KEY_ENTER,
