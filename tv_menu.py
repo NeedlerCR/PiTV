@@ -142,6 +142,12 @@ keypad_error   = ""
 pending_game_key = ""
 pending_game_cmd: list = []
 
+# Tic-Tac-Toe mode selection
+ttt_sel   = 0          # 0 = 1 player, 1 = 2 player
+ttt_mode  = "2P"       # "1P" (vs computer) or "2P"
+ttt_stage = 1          # which player's PIN we're collecting (2P)
+ttt_p1    = ""         # player 1's name (2P)
+
 # Lockout
 otp_fail_count  = 0
 system_locked   = False
@@ -1174,15 +1180,40 @@ def run_snake(stdscr):
         log(f"Snake: stop (apples {apples}, speed {speed_lvl}, score {final})")
 
 
-def run_noughts(stdscr):
-    """Built-in 2-player Noughts & Crosses (hotseat: X then O).
+TTT_LINES = [(0,1,2),(3,4,5),(6,7,8),(0,3,6),(1,4,7),(2,5,8),(0,4,8),(2,4,6)]
+
+
+def _ttt_wins(b, m):
+    return any(b[a] == b[x] == b[y] == m for a, x, y in TTT_LINES)
+
+
+def _ttt_ai(board, me, opp):
+    """Pick a move: win if able, else block, else centre/corner/edge."""
+    empties = [i for i in range(9) if not board[i]]
+    for i in empties:
+        b = board[:]; b[i] = me
+        if _ttt_wins(b, me):
+            return i
+    for i in empties:
+        b = board[:]; b[i] = opp
+        if _ttt_wins(b, opp):
+            return i
+    for i in (4, 0, 2, 6, 8, 1, 3, 5, 7):
+        if i in empties:
+            return i
+    return None
+
+
+def run_noughts(stdscr, vs_computer=False):
+    """Built-in Noughts & Crosses. Single-player (X = you, O = the computer)
+    or 2-player hotseat (X then O).
 
     Like Snake it reads the shared input_queue, so the controller, the CEC
     remote AND the Apple Home / Control-Centre remote all drive it — no
     external binary, so nothing to install or crash.
     """
     global controller_mode
-    log("Noughts & Crosses: start")
+    log(f"Noughts & Crosses: start ({'1P vs CPU' if vs_computer else '2P'})")
     controller_mode = "GAME_INTERNAL"
     input_queue.clear()
     curses.curs_set(0)
@@ -1192,16 +1223,25 @@ def run_noughts(stdscr):
     cur    = 4
     turn   = "X"
     winner = None
-    LINES  = [(0,1,2),(3,4,5),(6,7,8),(0,3,6),(1,4,7),(2,5,8),(0,4,8),(2,4,6)]
 
     def check():
-        for a, b, c in LINES:
+        for a, b, c in TTT_LINES:
             if board[a] and board[a] == board[b] == board[c]:
                 return board[a]
         return "draw" if all(board) else None
 
     try:
         while True:
+            # Computer's move (single-player: you are X, the computer is O).
+            if vs_computer and turn == "O" and not winner:
+                time.sleep(0.4)
+                mv = _ttt_ai(board, "O", "X")
+                if mv is not None:
+                    board[mv] = "O"
+                    winner = check()
+                    if not winner:
+                        turn = "X"
+
             try:
                 ch = stdscr.getch()
                 if ch != -1:
@@ -1223,6 +1263,9 @@ def run_noughts(stdscr):
                 if winner:
                     if cmd == "SELECT":          # play again
                         board = [""] * 9; cur = 4; turn = "X"; winner = None
+                    continue
+                # In single-player, only place on your (X) turn.
+                if vs_computer and turn != "X":
                     continue
                 r, c = cur // 3, cur % 3
                 if   cmd == "UP"    and r > 0: cur -= 3
@@ -1246,7 +1289,8 @@ def run_noughts(stdscr):
                 try: stdscr.addstr(y, x, s, a)
                 except curses.error: pass
 
-            title = "NOUGHTS & CROSSES"
+            title = ("NOUGHTS & CROSSES  (vs Computer)" if vs_computer
+                     else "NOUGHTS & CROSSES  (2 Player)")
             put(oy - 2, max(0, (max_x - len(title)) // 2), title,
                 curses.color_pair(2) | curses.A_BOLD)
             for r in range(3):
@@ -1266,9 +1310,17 @@ def run_noughts(stdscr):
             if winner == "draw":
                 msg = " Draw!   A/SELECT: play again    B/BACK: quit "
             elif winner:
-                msg = f" {winner} wins!   A/SELECT: play again    B/BACK: quit "
+                if vs_computer:
+                    who = "You win!" if winner == "X" else "Computer wins!"
+                else:
+                    who = f"{winner} wins!"
+                msg = f" {who}   A/SELECT: play again    B/BACK: quit "
             else:
-                msg = (f" Turn: {turn}    D-pad/Stick: move    A/SELECT: place"
+                if vs_computer:
+                    turn_txt = "Your turn (X)" if turn == "X" else "Computer…"
+                else:
+                    turn_txt = f"Turn: {turn}"
+                msg = (f" {turn_txt}    D-pad/Stick: move    A/SELECT: place"
                        f"    B/BACK: quit ")
             put(max_y - 1, 0, msg.center(max_x - 1),
                 curses.A_REVERSE | curses.A_DIM)
@@ -1757,6 +1809,7 @@ def main(stdscr):
     global keypad_row, keypad_col, keypad_entered, keypad_error
     global lock_entered, lock_error
     global pending_game_key, pending_game_cmd
+    global ttt_sel, ttt_mode, ttt_stage, ttt_p1
     global otp_fail_count, system_locked, log_visible
     global lock_fail_count, hard_locked
     global controller_mode
@@ -1958,11 +2011,28 @@ def main(stdscr):
                     current_view = "MENU"
                 elif cmd in ("SELECT","RIGHT"):
                     label, game_cmd, game_key, _ = GAME_OPTIONS[selected_game_idx]
-                    # Every game needs a PIN now, so always go via the keypad;
-                    # the game (built-in or external) launches after it verifies.
                     pending_game_key = game_key
                     pending_game_cmd = game_cmd
-                    current_view     = "KEYPAD"
+                    if game_key == "TICTACTOE":
+                        # Choose 1-player (vs computer) or 2-player first.
+                        ttt_sel = 0
+                        current_view = "TTT_MODE"
+                    else:
+                        # Every game needs a PIN, so go via the keypad; the game
+                        # (built-in or external) launches after it verifies.
+                        current_view = "KEYPAD"
+
+            elif current_view == "TTT_MODE":
+                if cmd in ("UP", "DOWN"):
+                    ttt_sel ^= 1
+                elif cmd in ("BACK", "LEFT"):
+                    current_view = "GAMES_MENU"
+                elif cmd in ("SELECT", "RIGHT"):
+                    ttt_mode  = "1P" if ttt_sel == 0 else "2P"
+                    ttt_stage = 1
+                    ttt_p1    = ""
+                    keypad_entered = keypad_error = ""
+                    current_view = "KEYPAD"
 
             elif current_view == "KEYPAD":
                 if cmd == "UP":
@@ -1991,13 +2061,24 @@ def main(stdscr):
                             set_highscore_name(pending_game_cmd[0], who)
                             show_message(stdscr, ["", f"Welcome {who}!"],
                                          color_pair=2, duration=1.5)
-                            if pending_game_key == "SNAKE":
-                                run_snake(stdscr)
-                            elif pending_game_key == "TICTACTOE":
-                                run_noughts(stdscr)
+                            if (pending_game_key == "TICTACTOE" and ttt_mode == "2P"
+                                    and ttt_stage == 1):
+                                # Player 1 verified; keep the keypad up for P2.
+                                ttt_p1 = who
+                                ttt_stage = 2
+                                keypad_entered = keypad_error = ""
                             else:
-                                run_game(stdscr, pending_game_cmd)
-                            current_view = "GAMES_MENU"
+                                if pending_game_key == "SNAKE":
+                                    run_snake(stdscr)
+                                elif pending_game_key == "TICTACTOE":
+                                    if ttt_mode == "1P":
+                                        run_noughts(stdscr, vs_computer=True)
+                                    else:
+                                        log(f"N&C 2P: {ttt_p1} vs {who}")
+                                        run_noughts(stdscr, vs_computer=False)
+                                else:
+                                    run_game(stdscr, pending_game_cmd)
+                                current_view = "GAMES_MENU"
                         else:
                             otp_fail_count += 1
                             remaining = OTP_MAX_FAILS - otp_fail_count
@@ -2019,7 +2100,8 @@ def main(stdscr):
                 current_view = "MENU"
 
         # ── Render ──────────────────────────────────────────────────
-        if current_view in ("MENU","DURATION_SELECT","GAMES_MENU","CLEAR","LOCKED"):
+        if current_view in ("MENU","DURATION_SELECT","GAMES_MENU","CLEAR",
+                             "LOCKED","TTT_MODE"):
             stdscr.erase()
 
         if hard_locked:
@@ -2040,10 +2122,17 @@ def main(stdscr):
             draw_games_menu(stdscr, selected_game_idx)
             draw_log_panel(stdscr)
 
+        elif current_view == "TTT_MODE":
+            _draw_card_list(stdscr, ["1 PLAYER  (vs Computer)", "2 PLAYER"],
+                            ttt_sel, title="NOUGHTS & CROSSES",
+                            subtitle="  A/Right: choose    B/Left: back",
+                            color=curses.color_pair(5))
+
         elif current_view == "KEYPAD":
-            draw_keypad(stdscr,
-                        GAME_OPTIONS[selected_game_idx][0],
-                        keypad_entered, keypad_error)
+            name = GAME_OPTIONS[selected_game_idx][0]
+            if pending_game_key == "TICTACTOE" and ttt_mode == "2P":
+                name += f" — PLAYER {ttt_stage}"
+            draw_keypad(stdscr, name, keypad_entered, keypad_error)
 
         elif current_view == "ART_RUNNING":
             if should_clear_screen:

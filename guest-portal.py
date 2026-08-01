@@ -43,11 +43,17 @@ PITV_DIR        = os.path.expanduser("~/.pitv")
 GUEST_FILE      = os.path.join(PITV_DIR, "guests.json")
 ADMIN_FILE      = os.path.join(PITV_DIR, "admin.json")
 PIN_FILE        = os.path.join(PITV_DIR, "pins.json")
-SECRET_FILE     = os.path.join(PITV_DIR, "portal-secret")
+# Separate signing keys per portal so `screen guest kick all` (which rotates
+# the guest key) can't log admins out. Rotating a key invalidates every
+# session cookie signed with it.
+GUEST_SECRET    = os.path.join(PITV_DIR, "portal-secret")
+ADMIN_SECRET    = os.path.join(PITV_DIR, "admin-secret")
+SECRET_FILE     = ADMIN_SECRET if ADMIN else GUEST_SECRET
 GUEST_MODE_FILE = "/tmp/pitv-guest-mode"
 FIFO            = "/tmp/tv_menu.fifo"
 UDP_ADDR        = ("127.0.0.1", 8129)
-SESSION_MAX_AGE = 7 * 24 * 3600
+# Admin sessions effectively never expire; guest sessions last a week.
+SESSION_MAX_AGE = (3650 if ADMIN else 7) * 24 * 3600
 ROTATE_PERIOD   = 7 * 24 * 3600
 EMERGENCY_CODE  = "159753"
 
@@ -273,7 +279,11 @@ def gate_body():
 def controls_body(username):
     if ADMIN:
         gm = guest_mode_on()
+        pin = guest_pin(username)
+        pin_card = (f'<div class=card><p class=muted>Your game PIN</p>'
+                    f'<div class=pin>{pin}</div></div>') if pin != "—" else ""
         head = (f"<h1>PiTV Admin</h1><p class=muted>Signed in as {username}</p>"
+                + pin_card +
                 f'<div class=card><p class=muted>Guest Mode is '
                 f'<b>{"ON" if gm else "OFF"}</b></p><div class=row>'
                 f'<button class=on onclick="act(\'guest_on\')">Guest Mode On</button>'

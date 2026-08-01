@@ -25,6 +25,7 @@ PITV_DIR       = os.path.expanduser("~/.pitv")
 GUEST_FILE     = os.path.join(PITV_DIR, "guests.json")
 ADMIN_FILE     = os.path.join(PITV_DIR, "admin.json")
 PIN_FILE       = os.path.join(PITV_DIR, "pins.json")
+GUEST_SECRET   = os.path.join(PITV_DIR, "portal-secret")
 EMERGENCY_CODE = "159753"
 
 
@@ -170,11 +171,26 @@ def cmd_admin_remove(args):
     print(f"Removed admin '{args[0]}'.")
 
 
+def cmd_kick():
+    """Sign every guest out (even offline ones) by rotating the guest session
+    key — all existing guest cookies become invalid. Admins are unaffected."""
+    os.makedirs(PITV_DIR, exist_ok=True)
+    with open(GUEST_SECRET, "wb") as f:
+        f.write(secrets.token_bytes(32))
+    try:
+        os.chmod(GUEST_SECRET, 0o600)
+    except OSError:
+        pass
+    print("All guests signed out (guest session key rotated).")
+
+
 def main():
     args = sys.argv[1:]
     cmd = args[0] if args else ""
     if cmd == "password":
         cmd_password_set(args[1:])
+    elif cmd == "kick":
+        cmd_kick()
     elif cmd == "list":
         cmd_list()
     elif cmd == "remove":

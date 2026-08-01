@@ -61,7 +61,9 @@ logged with the person's name so you can see who played. Snake is built-in
 (R button speeds it up; end score gets a speed
 multiplier). Snake and Noughts & Crosses are built-in curses games
 (`run_snake`, `run_noughts`) that read `input_queue`, so the controller, CEC
-and the Apple remote all drive them. Tetris is `vitetris` (its own menu has
+and the Apple remote all drive them. Noughts & Crosses offers a 1-player
+(vs computer, `_ttt_ai`) or 2-player mode (`TTT_MODE` view) before the PIN
+keypad; 2-player collects both players' PINs. Tetris is `vitetris` (its own menu has
 1- and 2-player). Install extras: `sudo apt install -y vitetris`. `run_game`
 logs each game's exit code and duration to `/tmp/pitv.log` (an instant
 `rc!=0` = crash-on-launch).
