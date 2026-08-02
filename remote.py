@@ -6,16 +6,22 @@ Interactive SSH keyboard remote for PiTV.
 Run via:  screen remote on
 
 Reads keystrokes from the SSH terminal and forwards them to the
-tv_menu.py FIFO pipe as navigation commands.
+tv_menu.py FIFO pipe.
 
-  Arrow keys / WASD  →  UP / DOWN / LEFT / RIGHT
+In the MENU, keys navigate:
+  Arrow keys         →  UP / DOWN / LEFT / RIGHT
   Enter              →  SELECT
   Backspace / Delete →  BACK
-  ESC or Ctrl+C      →  exit remote mode
 
-Games running on tty1 handle their own input from the physical
-keyboard / wireless controller.  This remote only controls the
-PiTV menu and lets you exit a game via BACK.
+While an EXTERNAL game is running, EVERY key is forwarded straight into
+the game (tv_menu injects it as a real keystroke via uinput), so you can
+type numbers, letters and punctuation — e.g. pick a grid size in
+Minesweeper, enter digits in Sudoku, or play NetHack over SSH:
+  Arrow keys → movement      Space → space (reveal / fire)
+  Enter → enter              letters / digits / punctuation → typed as-is
+  Backspace → back / Esc     (to delete in Sudoku, press 'x')
+
+  ESC, Ctrl+C or Ctrl+]  →  exit remote mode
 """
 
 import os
@@ -63,42 +69,42 @@ def main() -> None:
         sys.exit(1)
 
     print("PiTV Remote — active")
-    print("  Arrow keys / WASD = navigate   Enter = select")
-    print("  Backspace = back               ESC = exit remote mode")
+    print("  Menu: arrow keys navigate, Enter selects, Backspace goes back.")
+    print("  In a game: every key is passed straight through.")
+    print("  ESC / Ctrl+C / Ctrl+] = exit remote mode")
     print()
 
     try:
         while True:
             key = read_key()
 
-            # Exit conditions
-            if key in (b"\x1b", b"\x03", b"q", b"Q"):
-                # Bare ESC (no following bytes) or Ctrl+C
-                if key == b"\x1b":
-                    break
+            # Exit conditions: bare ESC, Ctrl+C, Ctrl+]
+            if key in (b"\x1b", b"\x03", b"\x1d"):
                 break
 
             # Arrow keys (ESC [ A/B/C/D)
-            elif key in (b"\x1b[A", b"w", b"W"):
+            elif key == b"\x1b[A":
                 send("UP")
-            elif key in (b"\x1b[B", b"s", b"S"):
+            elif key == b"\x1b[B":
                 send("DOWN")
-            elif key in (b"\x1b[C", b"d", b"D"):
+            elif key == b"\x1b[C":
                 send("RIGHT")
-            elif key in (b"\x1b[D", b"a", b"A"):
+            elif key == b"\x1b[D":
                 send("LEFT")
 
-            # Confirm / select
+            # Enter / space / backspace / tab as named keys
             elif key in (b"\r", b"\n"):
-                send("SELECT")
-
-            # Back / cancel
+                send("ENTER")
+            elif key == b" ":
+                send("SPACE")
             elif key in (b"\x7f", b"\x08"):
                 send("BACK")
+            elif key == b"\t":
+                send("TAB")
 
-            # Ctrl+C fallback
-            elif key == b"\x03":
-                break
+            # Any other single printable character → typed into the game.
+            elif len(key) == 1 and 0x21 <= key[0] <= 0x7e:
+                send("TYPE " + key.decode("ascii"))
 
     except KeyboardInterrupt:
         pass

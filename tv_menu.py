@@ -23,7 +23,7 @@ except ImportError:
     EVDEV_OK = False
 
 # ChronosVer: vYYYY.MAJOR.MINOR.BUG
-VERSION = "v2026.2.2.1"
+VERSION = "v2026.2.3.0"
 
 # ─────────────────────────────────────────────────────────────────────
 # LOG SYSTEM
@@ -141,6 +141,7 @@ keypad_error   = ""
 # Pending game launch (waiting for OTP)
 pending_game_key = ""
 pending_game_cmd: list = []
+pending_game_2p  = False    # the pending game is 2-player → collect two PINs
 
 # Tic-Tac-Toe mode selection
 ttt_sel   = 0          # 0 = 1 player, 1 = 2 player
@@ -205,7 +206,6 @@ GAME_KEYS = {
     "MOONBUGGY":   ["moon-buggy"],       # retro jump-the-craters, high score
     "TYRIAN":      ["opentyrian"],       # classic vertical shmup, high score
     "SUPERTUX":    ["supertux2"],        # modern platformer (Mario-like)
-    "FROZENBUBBLE":["frozen-bubble"],    # bubble-pop puzzle, 1-2 player, high score
     "BOULDERDASH": ["phear"],            # Boulder Dash clone (pkg cavezofphear)
     "2048":        ["2048"],             # modern slide-and-add number puzzle
     "SUDOKU":      ["nudoku"],           # ncurses Sudoku
@@ -227,7 +227,6 @@ GAME_OPTIONS = [
     ("TYRIAN",            ["opentyrian"],     "TYRIAN",       False),
     ("MOON BUGGY",        ["moon-buggy"],     "MOONBUGGY",    False),
     ("SUPER TUX",         ["supertux2"],      "SUPERTUX",     False),
-    ("FROZEN BUBBLE",     ["frozen-bubble"],  "FROZENBUBBLE", True),
     ("BOULDER DASH",      ["phear"],          "BOULDERDASH",  False),
     # ── puzzle / strategy ──
     ("2048",              ["2048"],           "2048",         False),
@@ -529,10 +528,32 @@ def listen_fifo():
                             log("UNLOCK rejected")
                         continue
 
+                    # `screen remote` raw typing: "TYPE x" sends one literal
+                    # character (case-sensitive) into a running external game —
+                    # e.g. a digit for Sudoku's grid size, or 'f' to flag a mine.
+                    # Ignored unless an external game is on screen. Not logged
+                    # (would flood the log while typing).
+                    if raw[:5].upper() == "TYPE " and len(raw) > 5:
+                        if controller_mode == "GAME_EXTERNAL":
+                            for ch in raw[5:]:
+                                _inject_char(ch)
+                        continue
+
                     log(f"FIFO: {raw[:60]}")
 
-                    if cmd in ("UP","DOWN","LEFT","RIGHT","SELECT","BACK","CLEAR","HOME"):
+                    # HOME/CLEAR are always menu-level (HOME quits a game). Other
+                    # keys drive a running external game via uinput injection, and
+                    # otherwise feed the menu / built-in games through input_queue.
+                    if cmd in ("HOME", "CLEAR"):
                         input_queue.append(cmd)
+                    elif (controller_mode == "GAME_EXTERNAL" and cmd in
+                          ("UP","DOWN","LEFT","RIGHT","SELECT","BACK","PLAY",
+                           "ENTER","SPACE","TAB","ESC","BKSP","SPEED")):
+                        _remote_inject("SELECT" if cmd == "ENTER" else cmd)
+                    elif cmd in ("UP","DOWN","LEFT","RIGHT","SELECT","BACK"):
+                        input_queue.append(cmd)
+                    elif cmd == "ENTER":
+                        input_queue.append("SELECT")
                     elif cmd.startswith("RUN "):
                         parts   = raw.split(" ", 3)
                         art_key = parts[1].upper() if len(parts) > 1 else ""
@@ -731,42 +752,118 @@ def _remote_keymap():
     # Each token maps to one or more keycodes. SELECT and PLAY both send
     # Enter + Space so either the tap or play/pause confirms a menu AND fires /
     # starts (e.g. Space Invaders' "press SPACE to play").
+    if not EVDEV_OK:
+        return {}
     return {
         "UP":     [ecodes.KEY_UP],    "DOWN":  [ecodes.KEY_DOWN],
         "LEFT":   [ecodes.KEY_LEFT],  "RIGHT": [ecodes.KEY_RIGHT],
         "SELECT": [ecodes.KEY_ENTER, ecodes.KEY_SPACE],
         "PLAY":   [ecodes.KEY_ENTER, ecodes.KEY_SPACE],
+        "ENTER":  [ecodes.KEY_ENTER], "SPACE": [ecodes.KEY_SPACE],
+        "TAB":    [ecodes.KEY_TAB],   "ESC":   [ecodes.KEY_ESC],
+        "BKSP":   [ecodes.KEY_BACKSPACE],
         "BACK":   [ecodes.KEY_ESC],   "SPEED": [ecodes.KEY_R],
     }
 
 
-def _remote_inject(token):
-    """Inject keystrokes so the Apple remote can drive EXTERNAL games (which
-    read the console keyboard, not input_queue). Lazily opens a uinput device;
-    if that isn't permitted it silently no-ops (menu/built-in games still
-    work)."""
+# Punctuation → (keycode, needs-shift). Letters/digits are derived directly.
+def _punct_map():
+    if not EVDEV_OK:
+        return {}
+    e = ecodes
+    return {
+        ' ': (e.KEY_SPACE, False),
+        '-': (e.KEY_MINUS, False), '_': (e.KEY_MINUS, True),
+        '=': (e.KEY_EQUAL, False), '+': (e.KEY_EQUAL, True),
+        '.': (e.KEY_DOT, False),   '>': (e.KEY_DOT, True),
+        ',': (e.KEY_COMMA, False), '<': (e.KEY_COMMA, True),
+        '/': (e.KEY_SLASH, False), '?': (e.KEY_SLASH, True),
+        ';': (e.KEY_SEMICOLON, False), ':': (e.KEY_SEMICOLON, True),
+        "'": (e.KEY_APOSTROPHE, False), '"': (e.KEY_APOSTROPHE, True),
+        '[': (e.KEY_LEFTBRACE, False),  '{': (e.KEY_LEFTBRACE, True),
+        ']': (e.KEY_RIGHTBRACE, False), '}': (e.KEY_RIGHTBRACE, True),
+        '\\': (e.KEY_BACKSLASH, False), '|': (e.KEY_BACKSLASH, True),
+        '`': (e.KEY_GRAVE, False),  '~': (e.KEY_GRAVE, True),
+        '!': (e.KEY_1, True), '@': (e.KEY_2, True), '#': (e.KEY_3, True),
+        '$': (e.KEY_4, True), '%': (e.KEY_5, True), '^': (e.KEY_6, True),
+        '&': (e.KEY_7, True), '*': (e.KEY_8, True), '(': (e.KEY_9, True),
+        ')': (e.KEY_0, True),
+    }
+
+
+def _char_to_key(ch):
+    """Map a single character to (keycode, needs_shift), or None."""
+    if not ch or not EVDEV_OK:
+        return None
+    if ch.isalpha() and ch.isascii():
+        return (getattr(ecodes, f"KEY_{ch.upper()}", None), ch.isupper())
+    if ch.isdigit():
+        return (getattr(ecodes, f"KEY_{ch}", None), False)
+    return _punct_map().get(ch)
+
+
+def _all_inject_keys():
+    ks = {k for v in _remote_keymap().values() for k in v}
+    ks |= {ecodes.KEY_SPACE, ecodes.KEY_LEFTSHIFT, ecodes.KEY_ENTER,
+           ecodes.KEY_BACKSPACE, ecodes.KEY_TAB, ecodes.KEY_ESC}
+    for c in "abcdefghijklmnopqrstuvwxyz0123456789":
+        kc = _char_to_key(c)
+        if kc and kc[0] is not None:
+            ks.add(kc[0])
+    for kc, _sh in _punct_map().values():
+        ks.add(kc)
+    return sorted(ks)
+
+
+def _ensure_remote_ui():
+    """Lazily open the shared uinput device used to type into EXTERNAL games
+    (the Apple remote and the SSH `screen remote`). No-ops if not permitted."""
     global _remote_ui, _remote_ui_tried
     if not EVDEV_OK:
-        return
-    keys = _remote_keymap().get(token)
-    if not keys:
-        return
+        return None
     if _remote_ui is None and not _remote_ui_tried:
         _remote_ui_tried = True
         try:
-            allk = sorted({k for v in _remote_keymap().values() for k in v}
-                          | {ecodes.KEY_SPACE})
-            _remote_ui = UInput({ecodes.EV_KEY: allk}, name="pitv-remote-kb")
+            _remote_ui = UInput({ecodes.EV_KEY: _all_inject_keys()},
+                                name="pitv-remote-kb")
         except Exception as e:
             log(f"Remote uinput unavailable: {e}")
-    if _remote_ui:
-        for kc in keys:
-            try:
-                _remote_ui.write(ecodes.EV_KEY, kc, 1); _remote_ui.syn()
-                time.sleep(0.02)
-                _remote_ui.write(ecodes.EV_KEY, kc, 0); _remote_ui.syn()
-            except Exception as e:
-                log(f"Remote inject error: {e}")
+    return _remote_ui
+
+
+def _press_keys(keycodes, shift=False):
+    ui = _ensure_remote_ui()
+    if not ui:
+        return
+    try:
+        if shift:
+            ui.write(ecodes.EV_KEY, ecodes.KEY_LEFTSHIFT, 1); ui.syn()
+        for kc in keycodes:
+            if kc is None:
+                continue
+            ui.write(ecodes.EV_KEY, kc, 1); ui.syn()
+            time.sleep(0.02)
+            ui.write(ecodes.EV_KEY, kc, 0); ui.syn()
+        if shift:
+            ui.write(ecodes.EV_KEY, ecodes.KEY_LEFTSHIFT, 0); ui.syn()
+    except Exception as e:
+        log(f"Remote inject error: {e}")
+
+
+def _remote_inject(token):
+    """Inject keystrokes so a remote (Apple Home / SSH `screen remote`) can
+    drive EXTERNAL games, which read the console keyboard, not input_queue."""
+    keys = _remote_keymap().get(token)
+    if keys:
+        _press_keys(keys)
+
+
+def _inject_char(ch):
+    """Type one literal character into a running EXTERNAL game (e.g. a digit
+    for Sudoku, or 'f' to flag in Minesweeper) over `screen remote`."""
+    mapped = _char_to_key(ch)
+    if mapped and mapped[0] is not None:
+        _press_keys([mapped[0]], shift=mapped[1])
 
 
 def listen_cec_udp():
@@ -961,7 +1058,6 @@ def run_game(stdscr, cmd_list: list):
             # added games where package == binary (listed for a clear message)
             "moon-buggy":     "moon-buggy",
             "opentyrian":     "opentyrian",
-            "frozen-bubble":  "frozen-bubble",
             "2048":           "2048",
             "nudoku":         "nudoku",
             "freesweep":      "freesweep",
@@ -997,7 +1093,7 @@ def run_game(stdscr, cmd_list: list):
     # SDL games need the kmsdrm video driver on the bare framebuffer console.
     # (Harmless for the SDL 1.2 ones — they ignore it — but correct for SDL2.)
     SDL_GAMES = {"chromium-bsu", "lbreakouthd",
-                 "opentyrian", "supertux2", "frozen-bubble"}
+                 "opentyrian", "supertux2"}
     is_sdl    = binary in SDL_GAMES
 
     # Controller-to-keys mapper. SDL games on the console also read the
@@ -1895,7 +1991,7 @@ def main(stdscr):
     global active_art_type, art_stop_time, should_clear_screen
     global keypad_row, keypad_col, keypad_entered, keypad_error
     global lock_entered, lock_error
-    global pending_game_key, pending_game_cmd
+    global pending_game_key, pending_game_cmd, pending_game_2p
     global ttt_sel, ttt_mode, ttt_stage, ttt_p1
     global otp_fail_count, system_locked, log_visible
     global lock_fail_count, hard_locked
@@ -2097,16 +2193,21 @@ def main(stdscr):
                 elif cmd in ("BACK","LEFT"):
                     current_view = "MENU"
                 elif cmd in ("SELECT","RIGHT"):
-                    label, game_cmd, game_key, _ = GAME_OPTIONS[selected_game_idx]
+                    label, game_cmd, game_key, is2p = GAME_OPTIONS[selected_game_idx]
                     pending_game_key = game_key
                     pending_game_cmd = game_cmd
+                    pending_game_2p  = is2p
                     if game_key == "TICTACTOE":
                         # Choose 1-player (vs computer) or 2-player first.
                         ttt_sel = 0
                         current_view = "TTT_MODE"
                     else:
-                        # Every game needs a PIN, so go via the keypad; the game
-                        # (built-in or external) launches after it verifies.
+                        # Every game needs a PIN, so go via the keypad. A 2-player
+                        # game (e.g. Tetris) collects BOTH players' PINs first —
+                        # stage 1 = P1, stage 2 = P2 — then launches.
+                        ttt_stage = 1
+                        ttt_p1    = ""
+                        keypad_entered = keypad_error = ""
                         current_view = "KEYPAD"
 
             elif current_view == "TTT_MODE":
@@ -2144,25 +2245,37 @@ def main(stdscr):
                         who = verify_pin(entered)
                         if who:
                             otp_fail_count = 0
-                            log(f"{pending_game_key} unlocked by {who}")
-                            set_highscore_name(pending_game_cmd[0], who)
-                            show_message(stdscr, ["", f"Welcome {who}!"],
-                                         color_pair=2, duration=1.5)
-                            if (pending_game_key == "TICTACTOE" and ttt_mode == "2P"
-                                    and ttt_stage == 1):
+                            # Does this game need two PINs? TICTACTOE only in its
+                            # 2P mode; any other game whose menu row is flagged 2P.
+                            two_player = (
+                                (pending_game_key == "TICTACTOE" and ttt_mode == "2P")
+                                or (pending_game_key != "TICTACTOE" and pending_game_2p)
+                            )
+                            if two_player and ttt_stage == 1:
                                 # Player 1 verified; keep the keypad up for P2.
                                 ttt_p1 = who
                                 ttt_stage = 2
                                 keypad_entered = keypad_error = ""
+                                log(f"{pending_game_key} P1: {who}")
+                                show_message(stdscr,
+                                             ["", f"Welcome {who}!",
+                                              "Player 2 — enter your PIN"],
+                                             color_pair=2, duration=1.5)
                             else:
+                                log(f"{pending_game_key} unlocked by {who}")
+                                set_highscore_name(pending_game_cmd[0], who)
+                                if two_player:
+                                    log(f"{pending_game_key} 2P: {ttt_p1} vs {who}")
+                                    show_message(stdscr,
+                                                 ["", f"{ttt_p1} & {who} — go!"],
+                                                 color_pair=2, duration=1.5)
+                                else:
+                                    show_message(stdscr, ["", f"Welcome {who}!"],
+                                                 color_pair=2, duration=1.5)
                                 if pending_game_key == "SNAKE":
                                     run_snake(stdscr)
                                 elif pending_game_key == "TICTACTOE":
-                                    if ttt_mode == "1P":
-                                        run_noughts(stdscr, vs_computer=True)
-                                    else:
-                                        log(f"N&C 2P: {ttt_p1} vs {who}")
-                                        run_noughts(stdscr, vs_computer=False)
+                                    run_noughts(stdscr, vs_computer=(ttt_mode == "1P"))
                                 else:
                                     run_game(stdscr, pending_game_cmd)
                                 current_view = "GAMES_MENU"
@@ -2217,7 +2330,9 @@ def main(stdscr):
 
         elif current_view == "KEYPAD":
             name = GAME_OPTIONS[selected_game_idx][0]
-            if pending_game_key == "TICTACTOE" and ttt_mode == "2P":
+            _kp_2p = ((pending_game_key == "TICTACTOE" and ttt_mode == "2P")
+                      or (pending_game_key != "TICTACTOE" and pending_game_2p))
+            if _kp_2p:
                 name += f" — PLAYER {ttt_stage}"
             draw_keypad(stdscr, name, keypad_entered, keypad_error)
 

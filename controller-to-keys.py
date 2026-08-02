@@ -23,6 +23,12 @@ when the game exits.
         controller can drive player 2 in two-player games (e.g. vitetris).
         Left button F (action), bottom button G (secondary).
 
+  Per-game tweaks (tv_menu passes the game's binary as argv[1]):
+    nudoku    -> right button enters a number by pressing it that many times
+                 (1 press = 1 … 9 presses = 9; moving the cursor resets);
+                 top button = hint (fills one square).
+    freesweep -> right button reveals the square; top button flags a mine.
+
 Both the D-pad AND the left analog stick steer; a held direction
 auto-repeats so blocks keep sliding while you hold left/right.
 
@@ -139,6 +145,18 @@ def find_gamepads():
     return devices[:2]
 
 
+# Games that need extra keys the generic map doesn't emit (number entry,
+# hint/flag). tv_menu launches us with the game's binary as argv[1].
+GAME = sys.argv[1] if len(sys.argv) > 1 else ""
+
+# Digit keys are contiguous: KEY_1..KEY_9 == 2..10, so KEY_1 + (n-1) == KEY_n.
+_EXTRA_KEYS = [ecodes.KEY_1, ecodes.KEY_2, ecodes.KEY_3, ecodes.KEY_4,
+               ecodes.KEY_5, ecodes.KEY_6, ecodes.KEY_7, ecodes.KEY_8,
+               ecodes.KEY_9, ecodes.KEY_0, ecodes.KEY_H, ecodes.KEY_F,
+               ecodes.KEY_X, ecodes.KEY_C, ecodes.KEY_SPACE,
+               ecodes.KEY_ENTER, ecodes.KEY_LEFTSHIFT]
+
+
 def main():
     gamepads = find_gamepads()
     if not gamepads:
@@ -146,7 +164,8 @@ def main():
         sys.exit(0)
 
     try:
-        ui = UInput({ecodes.EV_KEY: ALL_KEYS}, name="pitv-virtual-kb")
+        ui = UInput({ecodes.EV_KEY: sorted(set(ALL_KEYS) | set(_EXTRA_KEYS))},
+                    name="pitv-virtual-kb")
     except Exception as e:
         # Almost always /dev/uinput permission: run setup-input.sh once.
         print(f"ERROR: cannot open uinput ({e}).", flush=True)
@@ -165,16 +184,50 @@ def main():
         ui.write(ecodes.EV_KEY, key, 0)
         ui.syn()
 
+    def press_shift(key):
+        ui.write(ecodes.EV_KEY, ecodes.KEY_LEFTSHIFT, 1); ui.syn()
+        press(key)
+        ui.write(ecodes.EV_KEY, ecodes.KEY_LEFTSHIFT, 0); ui.syn()
+
     # Per-player held-direction state, tracked separately for the D-pad
     # (hat) and the analog stick so releasing one falls back to the other.
+    # "digit" tracks Sudoku number entry (see game_button).
     state = {
         i: {
             "hat":    {"x": 0, "y": 0},
             "stick":  {"x": 0, "y": 0},
             "repeat": {"x": [0, 0.0], "y": [0, 0.0]},  # [direction, next_time]
+            "digit":  0,
         }
         for i in range(len(gamepads))
     }
+
+    def game_button(pi, code):
+        """Per-game face-button behaviour a plain pad can't otherwise do.
+        Returns True if it handled the button. Player 1 only; right face
+        button = BTN_WEST, top = BTN_NORTH on this controller."""
+        if pi != 0:
+            return False
+        if GAME == "nudoku":
+            # Right button: enter a number by pressing it N times → N. nudoku
+            # overwrites the cell with each digit, so sending the running count
+            # each press lands on the count. Moving the cursor resets it.
+            if code == ecodes.BTN_WEST:
+                s = state[0]
+                s["digit"] = s["digit"] % 9 + 1
+                press(ecodes.KEY_1 + s["digit"] - 1)
+                return True
+            if code == ecodes.BTN_NORTH:          # top → hint (fill one square)
+                press_shift(ecodes.KEY_H)
+                return True
+        elif GAME == "freesweep":
+            if code == ecodes.BTN_WEST:           # right → reveal the square
+                press(ecodes.KEY_SPACE)
+                return True
+            if code == ecodes.BTN_NORTH:          # top → flag/unflag a mine
+                press(ecodes.KEY_F)
+                return True
+        return False
 
     def effective(pi, axis):
         s = state[pi]
@@ -213,6 +266,8 @@ def main():
                 try:
                     for event in key.fileobj.read():
                         if event.type == ecodes.EV_KEY and event.value == 1:
+                            if game_button(pi, event.code):
+                                continue
                             k = btns.get(event.code)
                             if k is not None:
                                 if isinstance(k, (list, tuple)):
@@ -233,6 +288,10 @@ def main():
                             elif code in (ecodes.ABS_Y, ecodes.ABS_RY):
                                 s["stick"]["y"] = (1 if val > DEADZONE else
                                                    -1 if val < -DEADZONE else 0)
+                            # Moving the cursor resets Sudoku number entry, so
+                            # the next cell starts counting from 1 again.
+                            if effective(pi, "x") or effective(pi, "y"):
+                                s["digit"] = 0
                 except OSError:
                     pass
 

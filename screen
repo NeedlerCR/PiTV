@@ -21,9 +21,8 @@ Screensavers (optional duration in seconds):
 Other modes:
   screen mirror
   screen game <name>   e.g. snake tetris invaders breakout shooter tictactoe
-                            tyrian moonbuggy supertux frozenbubble boulderdash
-                            2048 sudoku minesweeper curseofwar nethack crawl
-                            dopewars
+                            tyrian moonbuggy supertux boulderdash 2048 sudoku
+                            minesweeper curseofwar nethack crawl dopewars
 
 Controller:
   screen controller        scan for Bluetooth controller (60 seconds)
@@ -162,7 +161,6 @@ case "$CMD" in
             tyrian|opentyrian)    KEY="TYRIAN"      ;;
             moon|moonbuggy|buggy) KEY="MOONBUGGY"   ;;
             tux|supertux)         KEY="SUPERTUX"    ;;
-            bubble|frozenbubble|fb) KEY="FROZENBUBBLE" ;;
             boulder|boulderdash|phear|dash) KEY="BOULDERDASH" ;;
             2048)                 KEY="2048"        ;;
             sudoku|nudoku)        KEY="SUDOKU"      ;;

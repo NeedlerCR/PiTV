@@ -35,18 +35,26 @@ screen is blocked. Only `screen unlock authorise <emergency code>` clears it
    `controller_mode` (`MENU` / `GAME_INTERNAL` / `GAME_EXTERNAL` / `KEYPAD`)
    gates what it injects. Built-in games (Snake) read `input_queue` directly.
 2. **`controller-to-keys.py`** — for external games, turns up to **two**
-   gamepads into real keyboard events via **`/dev/uinput`**. Player 1 → arrows
-   + Space/Enter/Esc; Player 2 → WASD + F/G (for 2-player games like
-   vitetris). Started by `run_game()` for every external game.
+   gamepads into real keyboard events via **`/dev/uinput`**. The left face
+   button is select/fire (Space+Enter), the bottom is back (Esc); Player 2 →
+   WASD + F/G. `run_game()` passes the game binary as `argv[1]`, so a few games
+   get tailored buttons: **nudoku** (right button types a number by pressing it
+   that many times, top = hint) and **freesweep** (right = reveal, top = flag).
 3. **CEC remote** (`listen_cec_remote`) and the **FIFO** `/tmp/tv_menu.fifo`
-   (written by the `screen` CLI and `remote.py`) also feed `input_queue`.
+   (written by the `screen` CLI, `remote.py`, and the web portals) also feed
+   `input_queue`. During an external game, FIFO nav tokens and `TYPE <char>`
+   lines are injected as real keystrokes (uinput) instead — so `screen remote`
+   now types **any** key into a running game (numbers, letters, punctuation),
+   e.g. picking a Minesweeper grid size or playing NetHack over SSH. The Apple
+   remote uses the same path (`_remote_inject` / `_inject_char`).
 
 > **Critical setup:** the service user needs access to `/dev/uinput` and
 > `/dev/input/event*`, or key injection silently fails and games ignore the
 > controller. Run **`./setup-input.sh`** once, then reboot. Symptoms of it not
 > being done: menu works, but games don't respond to the pad.
-> `remote.py` (`screen remote on`) only drives the *menu* — it can't act as a
-> second player inside a game. Use a real USB keyboard or a 2nd gamepad for P2.
+> `remote.py` (`screen remote on`) drives the menu AND (while a game is up)
+> types straight into it, but it still can't be a *second* local player — use a
+> real USB keyboard or a 2nd gamepad for P2.
 
 ## Games
 
@@ -66,20 +74,25 @@ menu and a "how to install" screen instead of crashing.
 **Built-in curses games** (`run_snake`, `run_noughts`) read `input_queue`, so
 the controller, CEC and Apple remote all drive them. Snake: R button speeds it
 up; end score gets a speed multiplier. Noughts & Crosses offers 1-player (vs
-computer, `_ttt_ai`) or 2-player (`TTT_MODE` view) before the PIN keypad; 2P
-collects both players' PINs.
+computer, `_ttt_ai`) or 2-player (`TTT_MODE` view) before the PIN keypad.
+
+**Two-player PINs:** any game whose `GAME_OPTIONS` row is flagged 2-player
+collects **both** players' PINs on the keypad (stage 1 = P1, stage 2 = P2,
+tracked by `pending_game_2p` + `ttt_stage`/`ttt_p1`) before launching — Tetris
+and Noughts & Crosses today.
 
 **The roster** (all PIN-locked). Retro arcade: Space Invaders (`ninvaders`),
 Breakout (`lbreakouthd`), Space Shooter (`chromium-bsu`), Tyrian
 (`opentyrian`, contrib), Moon Buggy (`moon-buggy`), Boulder Dash (`phear`, pkg
 `cavezofphear`). Modern: Tetris (`vitetris`, 1-/2-player in its own menu),
-Super Tux (`supertux2`, GL — may be slow on a Zero 2 W), Frozen Bubble
-(`frozen-bubble`, 1-/2-player). Puzzle/strategy: 2048 (`2048`), Sudoku
-(`nudoku`), Minesweeper (`freesweep`), Curse of War (`curseofwar`,
-RTS vs AI). Roguelike/RPG (keyboard recommended — too many keys for a pad):
-NetHack (`nethack`, pkg `nethack-console`), Dungeon Crawl (`crawl`), Dope Wars
-(`dopewars`). Install the lot:
-`sudo apt install -y vitetris ninvaders lbreakouthd chromium-bsu opentyrian moon-buggy cavezofphear supertux frozen-bubble 2048 nudoku freesweep curseofwar nethack-console crawl dopewars`
+Super Tux (`supertux2`, GL — may be slow on a Zero 2 W). Puzzle/strategy: 2048
+(`2048`), Sudoku (`nudoku`), Minesweeper (`freesweep`), Curse of War
+(`curseofwar`, RTS vs AI). Roguelike/RPG (keyboard recommended — too many keys
+for a pad): NetHack (`nethack`, pkg `nethack-console`), Dungeon Crawl
+(`crawl`), Dope Wars (`dopewars`). (Frozen Bubble was dropped — it's SDL 1.2
+and won't run on the bare framebuffer console, so it crashed on launch.)
+Install the lot:
+`sudo apt install -y vitetris ninvaders lbreakouthd chromium-bsu opentyrian moon-buggy cavezofphear supertux 2048 nudoku freesweep curseofwar nethack-console crawl dopewars`
 (`opentyrian` and `chromium-bsu` are in `contrib`/`non-free`, so enable those
 components in `/etc/apt/sources.list` first). The games menu (`_draw_card_list`)
 scrolls now that the list is long — the highlighted card stays in view with
