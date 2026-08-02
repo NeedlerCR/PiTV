@@ -23,7 +23,7 @@ except ImportError:
     EVDEV_OK = False
 
 # ChronosVer: vYYYY.MAJOR.MINOR.BUG
-VERSION = "v2026.2.3.0"
+VERSION = "v2026.2.3.1"
 
 # ─────────────────────────────────────────────────────────────────────
 # LOG SYSTEM

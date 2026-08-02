@@ -39,7 +39,12 @@ screen is blocked. Only `screen unlock authorise <emergency code>` clears it
    button is select/fire (Space+Enter), the bottom is back (Esc); Player 2 →
    WASD + F/G. `run_game()` passes the game binary as `argv[1]`, so a few games
    get tailored buttons: **nudoku** (right button types a number by pressing it
-   that many times, top = hint) and **freesweep** (right = reveal, top = flag).
+   that many times, top = hint, bottom/B = remove) and **freesweep** (right =
+   reveal, top = flag). For **vitetris** 2-player on a single pad, the left
+   stick is P1 and the right stick is P2 (WASD) — unless `screen remote` is on,
+   in which case P2 is the SSH keyboard and the whole pad stays P1
+   (`_remote_running()` decides). vitetris's Player-2 keys must be set to
+   W/A/S/D (+ rotate) once in its own Options menu for this to reach P2.
 3. **CEC remote** (`listen_cec_remote`) and the **FIFO** `/tmp/tv_menu.fifo`
    (written by the `screen` CLI, `remote.py`, and the web portals) also feed
    `input_queue`. During an external game, FIFO nav tokens and `TYPE <char>`

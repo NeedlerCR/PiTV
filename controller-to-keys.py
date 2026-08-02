@@ -26,8 +26,12 @@ when the game exits.
   Per-game tweaks (tv_menu passes the game's binary as argv[1]):
     nudoku    -> right button enters a number by pressing it that many times
                  (1 press = 1 … 9 presses = 9; moving the cursor resets);
-                 top button = hint (fills one square).
+                 top button = hint (fills one square); bottom (B) = remove.
     freesweep -> right button reveals the square; top button flags a mine.
+    vitetris  -> on ONE controller in 2-player, the left stick is player 1 and
+                 the right stick is player 2 (WASD). If `screen remote` is on,
+                 player 2 is the SSH keyboard instead, so the whole controller
+                 stays player 1 (no split).
 
 Both the D-pad AND the left analog stick steer; a held direction
 auto-repeats so blocks keep sliding while you hold left/right.
@@ -43,15 +47,32 @@ SDL2 games (chromium-bsu, lbreakout2, vitetris) also read the keyboard via
 evdev on the console, so this mapper is started for them too.
 """
 
+import subprocess
 import sys
 import time
 import selectors
 import evdev
 from evdev import ecodes, UInput
 
+
+def _remote_running():
+    """True if `screen remote on` (remote.py) is active — used to decide, for
+    2-player Tetris, whether player 2 is the SSH keyboard (remote on) or the
+    controller's right analog stick (remote off)."""
+    try:
+        return subprocess.run(["pgrep", "-f", "remote.py"],
+                              capture_output=True).returncode == 0
+    except Exception:
+        return False
+
 # Analog dead-zone.  Sticks report roughly -32768..32767; treat anything
 # past this as a firm direction and ignore the slack near centre.
 DEADZONE = 20000
+
+
+def _dir(v):
+    """Analog value → -1 / 0 / +1 with the dead-zone applied."""
+    return 1 if v > DEADZONE else -1 if v < -DEADZONE else 0
 
 # Auto-repeat timing for a held direction (D-pad or stick).
 INITIAL_DELAY   = 0.25   # wait before the first repeat
@@ -173,9 +194,20 @@ def main():
               "can write /dev/uinput.", flush=True)
         sys.exit(1)
 
+    # 2-player Tetris on ONE controller: the left analog stick is player 1,
+    # the right stick is player 2 (WASD). When `screen remote` is on, player 2
+    # is the SSH keyboard instead, so the whole controller stays player 1 and
+    # the right stick just mirrors the left (no split).
+    split_tetris = (GAME == "vitetris"
+                    and len(gamepads) == 1
+                    and not _remote_running())
+
     print(f"Mapping {len(gamepads)} controller(s):", flush=True)
     for i, dev in enumerate(gamepads):
         print(f"  player {i + 1}: {dev.name} ({dev.path})", flush=True)
+    if split_tetris:
+        print("  vitetris split: left stick = P1, right stick = P2 (WASD)",
+              flush=True)
 
     def press(key):
         ui.write(ecodes.EV_KEY, key, 1)
@@ -197,6 +229,8 @@ def main():
             "hat":    {"x": 0, "y": 0},
             "stick":  {"x": 0, "y": 0},
             "repeat": {"x": [0, 0.0], "y": [0, 0.0]},  # [direction, next_time]
+            "rstick": {"x": 0, "y": 0},                 # right stick (Tetris P2)
+            "rrepeat":{"x": [0, 0.0], "y": [0, 0.0]},
             "digit":  0,
         }
         for i in range(len(gamepads))
@@ -219,6 +253,9 @@ def main():
                 return True
             if code == ecodes.BTN_NORTH:          # top → hint (fill one square)
                 press_shift(ecodes.KEY_H)
+                return True
+            if code == ecodes.BTN_SOUTH:          # bottom (B) → remove the number
+                press(ecodes.KEY_X)
                 return True
         elif GAME == "freesweep":
             if code == ecodes.BTN_WEST:           # right → reveal the square
@@ -243,6 +280,23 @@ def main():
             return
         if want != rep[0]:
             press(keymap[want])          # new direction: fire immediately
+            rep[0] = want
+            rep[1] = now + INITIAL_DELAY
+        elif now >= rep[1]:
+            press(keymap[want])
+            rep[1] = now + REPEAT_INTERVAL
+
+    def update_raxis(pi, axis, now):
+        """Same as update_axis but for the right stick driving player 2's WASD
+        keys (Tetris split mode). Auto-repeats a held direction too."""
+        keymap = PLAYERS[1][axis]            # player-2 key map (WASD)
+        want   = state[pi]["rstick"][axis]
+        rep    = state[pi]["rrepeat"][axis]
+        if want == 0:
+            rep[0] = 0
+            return
+        if want != rep[0]:
+            press(keymap[want])
             rep[0] = want
             rep[1] = now + INITIAL_DELAY
         elif now >= rep[1]:
@@ -282,12 +336,22 @@ def main():
                                 s["hat"]["x"] = (val > 0) - (val < 0)
                             elif code == ecodes.ABS_HAT0Y:
                                 s["hat"]["y"] = (val > 0) - (val < 0)
-                            elif code in (ecodes.ABS_X, ecodes.ABS_RX):
-                                s["stick"]["x"] = (1 if val > DEADZONE else
-                                                   -1 if val < -DEADZONE else 0)
-                            elif code in (ecodes.ABS_Y, ecodes.ABS_RY):
-                                s["stick"]["y"] = (1 if val > DEADZONE else
-                                                   -1 if val < -DEADZONE else 0)
+                            elif code == ecodes.ABS_X:
+                                s["stick"]["x"] = _dir(val)
+                            elif code == ecodes.ABS_Y:
+                                s["stick"]["y"] = _dir(val)
+                            elif code == ecodes.ABS_RX:
+                                # Right stick: player 2 in Tetris split mode,
+                                # otherwise it just mirrors the left stick (P1).
+                                if split_tetris:
+                                    s["rstick"]["x"] = _dir(val)
+                                else:
+                                    s["stick"]["x"] = _dir(val)
+                            elif code == ecodes.ABS_RY:
+                                if split_tetris:
+                                    s["rstick"]["y"] = _dir(val)
+                                else:
+                                    s["stick"]["y"] = _dir(val)
                             # Moving the cursor resets Sudoku number entry, so
                             # the next cell starts counting from 1 again.
                             if effective(pi, "x") or effective(pi, "y"):
@@ -299,6 +363,9 @@ def main():
             for pi in state:
                 update_axis(pi, "x", now)
                 update_axis(pi, "y", now)
+                if split_tetris:
+                    update_raxis(pi, "x", now)
+                    update_raxis(pi, "y", now)
 
     except (KeyboardInterrupt, OSError):
         pass
