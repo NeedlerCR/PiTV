@@ -6,18 +6,22 @@ Converts up to two generic Bluetooth/USB gamepads into keyboard events
 via uinput.  Launched by tv_menu.py before a game starts and terminated
 when the game exits.
 
-  Buttons follow the Nintendo layout (A on the right = BTN_EAST is the
-  primary/confirm button; B on the bottom = BTN_SOUTH is back/quit).
+  Face buttons are consistent everywhere: the LEFT face button is
+  select/confirm/fire, the BOTTOM face button is back/quit. On this
+  controller the left button reports as BTN_EAST and the bottom as
+  BTN_SOUTH. The left button emits BOTH Space and Enter so it works as
+  "select" in menus (Enter) and as "fire/start" in games (Space); the top
+  and right face buttons are intentionally left unmapped so nothing else
+  acts as confirm.
 
   Player 1 (first pad)  -> arrow keys, plus:
-        A  -> Space   (fire / start — Space Invaders, hard-drop in Tetris)
-        X  -> Enter   (menu confirm — e.g. the bastet difficulty screen)
-        Y  -> Enter
-        +  -> Enter
-        B  -> Esc     (back / quit)
-        -  -> Esc
+        Left button   -> Space + Enter  (select / fire / start / confirm)
+        Bottom button -> Esc            (back / quit)
+        +             -> Enter          (menu select)
+        -             -> Esc            (back)
   Player 2 (second pad) -> W A S D, plus F / G as action keys, so a second
         controller can drive player 2 in two-player games (e.g. vitetris).
+        Left button F (action), bottom button G (secondary).
 
 Both the D-pad AND the left analog stick steer; a held direction
 auto-repeats so blocks keep sliding while you hold left/right.
@@ -53,10 +57,12 @@ PLAYERS = [
         "x": {-1: ecodes.KEY_LEFT, 1: ecodes.KEY_RIGHT},
         "y": {-1: ecodes.KEY_UP,   1: ecodes.KEY_DOWN},
         "buttons": {
-            ecodes.BTN_EAST:   ecodes.KEY_SPACE,   # A  -> fire / start / drop
-            ecodes.BTN_SOUTH:  ecodes.KEY_ESC,     # B  -> back / quit
-            ecodes.BTN_NORTH:  ecodes.KEY_ENTER,   # X  -> confirm / menu select
-            ecodes.BTN_WEST:   ecodes.KEY_ENTER,   # Y  -> confirm / menu select
+            # Left face button = the one and only select/confirm/fire button.
+            # Emits Space AND Enter so it selects menus and fires in games.
+            ecodes.BTN_EAST:   (ecodes.KEY_SPACE, ecodes.KEY_ENTER),  # left  -> select / fire
+            ecodes.BTN_SOUTH:  ecodes.KEY_ESC,     # bottom -> back / quit
+            # Top (BTN_NORTH) and right (BTN_WEST) deliberately unmapped so
+            # nothing but the left button acts as confirm.
             ecodes.BTN_START:  ecodes.KEY_ENTER,   # +  -> menu select
             ecodes.BTN_SELECT: ecodes.KEY_ESC,     # -  -> back
         },
@@ -76,10 +82,21 @@ PLAYERS = [
 ]
 
 # Every key any player can emit — the uinput device must advertise them all.
+# A button value may be a single keycode or a tuple of keycodes (e.g. the
+# left button emits Space+Enter), so flatten those out.
+def _flatten(vals):
+    for v in vals:
+        if isinstance(v, (list, tuple)):
+            yield from v
+        else:
+            yield v
+
 ALL_KEYS = sorted({
     k
     for p in PLAYERS
-    for k in list(p["x"].values()) + list(p["y"].values()) + list(p["buttons"].values())
+    for k in _flatten(
+        list(p["x"].values()) + list(p["y"].values()) + list(p["buttons"].values())
+    )
 })
 
 
@@ -197,8 +214,12 @@ def main():
                     for event in key.fileobj.read():
                         if event.type == ecodes.EV_KEY and event.value == 1:
                             k = btns.get(event.code)
-                            if k:
-                                press(k)
+                            if k is not None:
+                                if isinstance(k, (list, tuple)):
+                                    for kk in k:
+                                        press(kk)
+                                else:
+                                    press(k)
                         elif event.type == ecodes.EV_ABS:
                             code, val = event.code, event.value
                             s = state[pi]
