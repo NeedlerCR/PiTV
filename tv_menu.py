@@ -23,7 +23,7 @@ except ImportError:
     EVDEV_OK = False
 
 # ChronosVer: vYYYY.MAJOR.MINOR.BUG
-VERSION = "v2026.2.2.0"
+VERSION = "v2026.2.2.1"
 
 # ─────────────────────────────────────────────────────────────────────
 # LOG SYSTEM
@@ -253,9 +253,18 @@ _binary_path_cache: dict = {}
 
 
 def resolve_binary(name: str) -> str | None:
-    """Return the absolute path to `name`, checking /usr/games etc, or None."""
-    if name in _binary_path_cache:
-        return _binary_path_cache[name]
+    """Return the absolute path to `name`, checking /usr/games etc, or None.
+
+    Only *successful* resolutions are cached. A game installed while the menu
+    is already running (the common case — you deploy, then `apt install`) must
+    stop showing [N/A] on the very next render, so a miss is re-checked every
+    call. That's just a handful of stat()s per game, negligible even on a Zero.
+    Previously a miss was cached forever, so anything not yet installed when the
+    menu first drew the games list stayed [N/A] until the service restarted —
+    which is exactly why freshly-installed games looked missing."""
+    cached = _binary_path_cache.get(name)
+    if cached:
+        return cached
     # PATH-based lookup first (fast path if PATH happens to be set right)
     found = shutil.which(name)
     if not found:
@@ -264,7 +273,8 @@ def resolve_binary(name: str) -> str | None:
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                 found = candidate
                 break
-    _binary_path_cache[name] = found
+    if found:
+        _binary_path_cache[name] = found
     return found
 
 ART_OPTIONS = [
@@ -962,14 +972,16 @@ def run_game(stdscr, cmd_list: list):
         msg = [
             "GAME NOT INSTALLED",
             "",
-            f"'{binary}' was not found (checked /usr/games, /usr/bin, etc).",
+            f"Binary '{binary}' was not found.",
+            "Searched: " + "  ".join(_GAME_SEARCH_DIRS),
             "",
             f"Install:  sudo apt install -y {pkg_hint}",
+            f"Then check:  ls -l /usr/games/{binary}   (or:  which {binary})",
             "",
-            "Returning to menu in 4 seconds…",
+            "Returning to menu in 5 seconds…",
         ]
         log(f"Game not found: {binary} — install with: sudo apt install -y {pkg_hint}")
-        show_message(stdscr, msg, color_pair=1, duration=4.0)
+        show_message(stdscr, msg, color_pair=1, duration=5.0)
         return
 
     # Replace the bare name with its resolved absolute path for Popen
