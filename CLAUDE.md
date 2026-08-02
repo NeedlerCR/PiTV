@@ -51,22 +51,39 @@ screen is blocked. Only `screen unlock authorise <emergency code>` clears it
 ## Games
 
 Defined in `GAME_KEYS` / `GAME_OPTIONS` in `tv_menu.py`. `resolve_binary()`
-also searches `/usr/games` (systemd's PATH omits it). SDL games
-(`chromium-bsu`, `lbreakout2`) get `SDL_VIDEODRIVER=kmsdrm`. Every game needs
-a personal PIN (or the emergency code) — `FREE_GAMES` is empty but kept as the
-lever if you want to exempt any. PINs are per-person in `~/.pitv/pins.json`,
-managed by
+also searches `/usr/games` (systemd's PATH omits it). SDL games (the
+`SDL_GAMES` set in `run_game`: `chromium-bsu`, `lbreakouthd`, `opentyrian`,
+`supertux2`, `frozen-bubble`) get `SDL_VIDEODRIVER=kmsdrm`; console/ncurses
+games just run on the framebuffer. Every game needs a personal PIN (or the
+emergency code) — `FREE_GAMES` is empty but kept as the lever if you want to
+exempt any. PINs are per-person in `~/.pitv/pins.json`, managed by
 `screen pin assign|list|remove|rename` (`pin-admin.py`), and every unlock is
-logged with the person's name so you can see who played. Snake is built-in
-(R button speeds it up; end score gets a speed
-multiplier). Snake and Noughts & Crosses are built-in curses games
-(`run_snake`, `run_noughts`) that read `input_queue`, so the controller, CEC
-and the Apple remote all drive them. Noughts & Crosses offers a 1-player
-(vs computer, `_ttt_ai`) or 2-player mode (`TTT_MODE` view) before the PIN
-keypad; 2-player collects both players' PINs. Tetris is `vitetris` (its own menu has
-1- and 2-player). Install extras: `sudo apt install -y vitetris`. `run_game`
-logs each game's exit code and duration to `/tmp/pitv.log` (an instant
-`rc!=0` = crash-on-launch).
+logged with the person's name so you can see who played. `run_game` logs each
+game's exit code and duration to `/tmp/pitv.log` (an instant `rc!=0` =
+crash-on-launch). A binary that isn't installed shows an `[N/A]` badge in the
+menu and a "how to install" screen instead of crashing.
+
+**Built-in curses games** (`run_snake`, `run_noughts`) read `input_queue`, so
+the controller, CEC and Apple remote all drive them. Snake: R button speeds it
+up; end score gets a speed multiplier. Noughts & Crosses offers 1-player (vs
+computer, `_ttt_ai`) or 2-player (`TTT_MODE` view) before the PIN keypad; 2P
+collects both players' PINs.
+
+**The roster** (all PIN-locked). Retro arcade: Space Invaders (`ninvaders`),
+Breakout (`lbreakouthd`), Space Shooter (`chromium-bsu`), Tyrian
+(`opentyrian`, contrib), Moon Buggy (`moon-buggy`), Boulder Dash (`phear`, pkg
+`cavezofphear`). Modern: Tetris (`vitetris`, 1-/2-player in its own menu),
+Super Tux (`supertux2`, GL — may be slow on a Zero 2 W), Frozen Bubble
+(`frozen-bubble`, 1-/2-player). Puzzle/strategy: 2048 (`2048`), Sudoku
+(`nudoku`), Minesweeper (`freesweep`), Curse of War (`curseofwar`,
+RTS vs AI). Roguelike/RPG (keyboard recommended — too many keys for a pad):
+NetHack (`nethack`, pkg `nethack-console`), Dungeon Crawl (`crawl`), Dope Wars
+(`dopewars`). Install the lot:
+`sudo apt install -y vitetris ninvaders lbreakouthd chromium-bsu opentyrian moon-buggy cavezofphear supertux frozen-bubble 2048 nudoku freesweep curseofwar nethack-console crawl dopewars`
+(`opentyrian` and `chromium-bsu` are in `contrib`/`non-free`, so enable those
+components in `/etc/apt/sources.list` first). The games menu (`_draw_card_list`)
+scrolls now that the list is long — the highlighted card stays in view with
+`^ more ^` / `v more v` hints.
 
 ## Screen mirroring
 

@@ -20,7 +20,10 @@ Screensavers (optional duration in seconds):
 
 Other modes:
   screen mirror
-  screen game <snake|tetris|invaders|breakout|shooter|tictactoe>
+  screen game <name>   e.g. snake tetris invaders breakout shooter tictactoe
+                            tyrian moonbuggy supertux frozenbubble boulderdash
+                            2048 sudoku minesweeper curseofwar nethack crawl
+                            dopewars
 
 Controller:
   screen controller        scan for Bluetooth controller (60 seconds)
@@ -156,6 +159,18 @@ case "$CMD" in
             shoot|shooter|bsu)    KEY="SHOOTER"     ;;
             break|breakout)       KEY="BREAKOUT"    ;;
             ttt|tictactoe|toe|noughts|nc) KEY="TICTACTOE" ;;
+            tyrian|opentyrian)    KEY="TYRIAN"      ;;
+            moon|moonbuggy|buggy) KEY="MOONBUGGY"   ;;
+            tux|supertux)         KEY="SUPERTUX"    ;;
+            bubble|frozenbubble|fb) KEY="FROZENBUBBLE" ;;
+            boulder|boulderdash|phear|dash) KEY="BOULDERDASH" ;;
+            2048)                 KEY="2048"        ;;
+            sudoku|nudoku)        KEY="SUDOKU"      ;;
+            mine|minesweeper|sweep) KEY="MINESWEEPER" ;;
+            war|curseofwar|cow)   KEY="CURSEOFWAR"  ;;
+            nethack|hack)         KEY="NETHACK"     ;;
+            crawl|dcss|dungeon)   KEY="CRAWL"       ;;
+            dope|dopewars)        KEY="DOPEWARS"    ;;
             *)                    KEY="${KEY^^}"    ;;
         esac
         _send_raw "RUN GAME INDEFINITE ${KEY}"

@@ -23,7 +23,7 @@ except ImportError:
     EVDEV_OK = False
 
 # ChronosVer: vYYYY.MAJOR.MINOR.BUG
-VERSION = "v2026.2.1.0"
+VERSION = "v2026.2.2.0"
 
 # ─────────────────────────────────────────────────────────────────────
 # LOG SYSTEM
@@ -196,21 +196,49 @@ EXTERNAL_CMDS = {
 }
 
 GAME_KEYS = {
-    "SNAKE":      ["snake"],
-    "TETRIS":     ["vitetris"],         # normal Tetris; its menu also has 2-player
-    "INVADERS":   ["ninvaders"],
-    "BREAKOUT":   ["lbreakouthd"],
-    "SHOOTER":    ["chromium-bsu"],
+    "SNAKE":       ["snake"],
+    "TETRIS":      ["vitetris"],         # normal Tetris; its menu also has 2-player
+    "INVADERS":    ["ninvaders"],
+    "BREAKOUT":    ["lbreakouthd"],
+    "SHOOTER":     ["chromium-bsu"],
+    # ── added games (all PIN-locked like the rest) ──
+    "MOONBUGGY":   ["moon-buggy"],       # retro jump-the-craters, high score
+    "TYRIAN":      ["opentyrian"],       # classic vertical shmup, high score
+    "SUPERTUX":    ["supertux2"],        # modern platformer (Mario-like)
+    "FROZENBUBBLE":["frozen-bubble"],    # bubble-pop puzzle, 1-2 player, high score
+    "BOULDERDASH": ["phear"],            # Boulder Dash clone (pkg cavezofphear)
+    "2048":        ["2048"],             # modern slide-and-add number puzzle
+    "SUDOKU":      ["nudoku"],           # ncurses Sudoku
+    "MINESWEEPER": ["freesweep"],        # ncurses Minesweeper
+    "CURSEOFWAR":  ["curseofwar"],       # fast ncurses real-time strategy vs AI
+    "NETHACK":     ["nethack"],          # legendary roguelike (pkg nethack-console)
+    "CRAWL":       ["crawl"],            # Dungeon Crawl Stone Soup roguelike
+    "DOPEWARS":    ["dopewars"],         # buy-low/sell-high trading game, high score
 }
 
 # (label, cmd_list, game_key, is_2player)
 GAME_OPTIONS = [
-    ("SNAKE",             ["snake"],          "SNAKE",     False),
-    ("TETRIS",            ["vitetris"],       "TETRIS",    True),
-    ("SPACE INVADERS",    ["ninvaders"],      "INVADERS",  False),
-    ("BREAKOUT",          ["lbreakouthd"],    "BREAKOUT",  False),
-    ("SPACE SHOOTER",     ["chromium-bsu"],   "SHOOTER",   False),
-    ("NOUGHTS & CROSSES", ["noughts"],        "TICTACTOE", True),   # built-in
+    # ── arcade / action ──
+    ("SNAKE",             ["snake"],          "SNAKE",        False),  # built-in
+    ("TETRIS",            ["vitetris"],       "TETRIS",       True),
+    ("SPACE INVADERS",    ["ninvaders"],      "INVADERS",     False),
+    ("BREAKOUT",          ["lbreakouthd"],    "BREAKOUT",     False),
+    ("SPACE SHOOTER",     ["chromium-bsu"],   "SHOOTER",      False),
+    ("TYRIAN",            ["opentyrian"],     "TYRIAN",       False),
+    ("MOON BUGGY",        ["moon-buggy"],     "MOONBUGGY",    False),
+    ("SUPER TUX",         ["supertux2"],      "SUPERTUX",     False),
+    ("FROZEN BUBBLE",     ["frozen-bubble"],  "FROZENBUBBLE", True),
+    ("BOULDER DASH",      ["phear"],          "BOULDERDASH",  False),
+    # ── puzzle / strategy ──
+    ("2048",              ["2048"],           "2048",         False),
+    ("SUDOKU",            ["nudoku"],         "SUDOKU",       False),
+    ("MINESWEEPER",       ["freesweep"],      "MINESWEEPER",  False),
+    ("CURSE OF WAR",      ["curseofwar"],     "CURSEOFWAR",   False),
+    ("NOUGHTS & CROSSES", ["noughts"],        "TICTACTOE",    True),   # built-in
+    # ── adventure / RPG (keyboard recommended) ──
+    ("NETHACK",           ["nethack"],        "NETHACK",      False),
+    ("DUNGEON CRAWL",     ["crawl"],          "CRAWL",        False),
+    ("DOPE WARS",         ["dopewars"],       "DOPEWARS",     False),
 ]
 
 # Debian's bsdgames/bastet/etc packages install into /usr/games, but the
@@ -244,7 +272,7 @@ ART_OPTIONS = [
     ("CLOCK + STARS", None,     "CLOCK"),
     ("MATRIX RAIN",   None,     "MATRIX"),
     ("SCREEN MIRROR", "MIRROR", "MIRROR"),
-    ("RETRO GAMES",   "GAMES",  "GAMES"),
+    ("GAMES",         "GAMES",  "GAMES"),
 ]
 
 
@@ -916,6 +944,20 @@ def run_game(stdscr, cmd_list: list):
             "lbreakouthd":    "lbreakouthd",
             "chromium-bsu":   "chromium-bsu",
             "vitetris":       "vitetris",
+            # added games whose apt package name differs from the binary
+            "phear":          "cavezofphear",
+            "nethack":        "nethack-console",
+            "supertux2":      "supertux",
+            # added games where package == binary (listed for a clear message)
+            "moon-buggy":     "moon-buggy",
+            "opentyrian":     "opentyrian",
+            "frozen-bubble":  "frozen-bubble",
+            "2048":           "2048",
+            "nudoku":         "nudoku",
+            "freesweep":      "freesweep",
+            "curseofwar":     "curseofwar",
+            "crawl":          "crawl",
+            "dopewars":       "dopewars",
         }.get(binary, binary)
         msg = [
             "GAME NOT INSTALLED",
@@ -940,7 +982,10 @@ def run_game(stdscr, cmd_list: list):
     _reset_terminal()
     os.system("clear")
 
-    SDL_GAMES = {"chromium-bsu", "lbreakouthd"}
+    # SDL games need the kmsdrm video driver on the bare framebuffer console.
+    # (Harmless for the SDL 1.2 ones — they ignore it — but correct for SDL2.)
+    SDL_GAMES = {"chromium-bsu", "lbreakouthd",
+                 "opentyrian", "supertux2", "frozen-bubble"}
     is_sdl    = binary in SDL_GAMES
 
     # Controller-to-keys mapper. SDL games on the console also read the
@@ -1636,12 +1681,37 @@ def _draw_card_list(stdscr, items, selected_idx, title, subtitle, color):
 
     bx = 3
     bw = min(60, max_x-6)
-    y  = 6
+    top_y = 6
     guard = max_y - _LOG_GUARD if log_visible else max_y - 2
+    available = max(4, guard - top_y)
 
-    for idx, label in enumerate(items):
-        if y >= guard:
-            break
+    # The list can be longer than the screen (lots of games), so window it
+    # around the selection: the highlighted card is 4 rows tall, others 2.
+    def item_h(i):
+        return 4 if i == selected_idx else 2
+
+    start = end = selected_idx
+    used  = item_h(selected_idx)
+    i = selected_idx - 1                       # grow upward
+    while i >= 0 and used + item_h(i) <= available:
+        used += item_h(i); start = i; i -= 1
+    i = selected_idx + 1                        # grow downward
+    while i < len(items) and used + item_h(i) <= available:
+        used += item_h(i); end = i; i += 1
+    i = start - 1                               # fill any remaining space up top
+    while i >= 0 and used + item_h(i) <= available:
+        used += item_h(i); start = i; i -= 1
+
+    # "more above / below" hints so it's clear the list scrolls.
+    if start > 0:
+        try:
+            stdscr.addstr(5, bx + 7, "^ more ^", curses.color_pair(3) | curses.A_DIM)
+        except curses.error:
+            pass
+
+    y = top_y
+    for idx in range(start, end + 1):
+        label = items[idx]
         if idx == selected_idx:
             top = "+"  + "-"*(bw-2) + "+"
             mid = ("|  >>  " + label).ljust(bw-1) + "|"
@@ -1659,6 +1729,12 @@ def _draw_card_list(stdscr, items, selected_idx, title, subtitle, color):
             except curses.error:
                 pass
             y += 2
+
+    if end < len(items) - 1 and y < guard:
+        try:
+            stdscr.addstr(y, bx + 7, "v more v", curses.color_pair(3) | curses.A_DIM)
+        except curses.error:
+            pass
 
 
 def draw_main_menu(stdscr, sel):
@@ -1682,8 +1758,8 @@ def draw_games_menu(stdscr, sel):
     labels = [label + badge(key, is2p) for label,_,key,is2p in GAME_OPTIONS]
     _draw_card_list(
         stdscr, labels, sel,
-        title    = "RETRO GAMES",
-        subtitle = "  A/Right=select   B/Left=back   [N/A]=not installed",
+        title    = "GAMES LIBRARY",
+        subtitle = "  A/Right=select   B/Left=back   [N/A]=install it (see below)",
         color    = curses.color_pair(5),
     )
 
