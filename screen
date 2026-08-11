@@ -13,6 +13,10 @@ Usage: screen <command> [arg]
 Navigation:
   screen up | down | left | right | enter | back | clear
 
+TV power:
+  screen on
+  screen off
+
 Screensavers (optional duration in seconds):
   screen fire [seconds]
   screen clock [seconds]
@@ -95,6 +99,14 @@ case "$CMD" in
 
     enter)
         _send "SELECT"
+        ;;
+
+    on)
+        _send_raw "TV_ON"
+        ;;
+
+    off)
+        _send_raw "TV_OFF"
         ;;
 
     pin)
