@@ -1,0 +1,24 @@
+name: Add experimental fan display
+
+on:
+  push:
+    branches: [experimental]
+
+permissions:
+  contents: write
+
+jobs:
+  add-fan:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add fan renderer and command
+        shell: python
+        run: |
+          from pathlib import Path
+
+          tv = Path('tv_menu.py')
+          s = tv.read_text()
+
+          old =
