@@ -29,6 +29,7 @@ Screensavers (optional duration in seconds):
   screen fire [seconds]
   screen clock [seconds]
   screen matrix [seconds]
+  screen fan [seconds]
 
 Other modes:
   screen mirror
@@ -201,7 +202,7 @@ case "$CMD" in
         fi
         ;;
 
-    fire|clock|matrix)
+    fire|clock|matrix|fan)
         DUR="${2:-INDEFINITE}"
         _send "RUN ${CMD^^} ${DUR}"
         ;;

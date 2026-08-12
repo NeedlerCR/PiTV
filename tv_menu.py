@@ -280,6 +280,7 @@ ART_OPTIONS = [
     ("FIRE",          "FIRE",   "FIRE"),
     ("CLOCK + STARS", None,     "CLOCK"),
     ("MATRIX RAIN",   None,     "MATRIX"),
+    ("SPINNING FAN",  None,     "FAN"),
     ("SCREEN MIRROR", "MIRROR", "MIRROR"),
     ("GAMES",         "GAMES",  "GAMES"),
 ]
@@ -1670,6 +1671,38 @@ def render_clock(stdscr, frame):
             pass
 
 
+def render_fan(stdscr, frame):
+    """Animated four-blade fan rendered by the existing curses display."""
+    max_y, max_x = stdscr.getmaxyx()
+    cx, cy = max_x // 2, max_y // 2
+    radius = max(4, min(max_x // 4, max_y // 2 - 3))
+    angle = (frame * 0.32) % (2 * math.pi)
+
+    stdscr.erase()
+    for blade in range(4):
+        a = angle + blade * (math.pi / 2)
+        for step in range(1, radius + 1):
+            r = step / radius
+            spread = 0.12 + 0.28 * r
+            for off in (-spread, 0.0, spread):
+                x = int(round(cx + math.cos(a + off) * step * 1.45))
+                y = int(round(cy + math.sin(a + off) * step * 0.72))
+                if 0 <= x < max_x and 0 <= y < max_y:
+                    try:
+                        stdscr.addch(y, x, '█', curses.color_pair(2) | curses.A_BOLD)
+                    except curses.error:
+                        pass
+
+    try:
+        stdscr.addch(cy, cx, '●', curses.color_pair(4) | curses.A_BOLD)
+        base_y = min(max_y - 2, cy + radius + 2)
+        if base_y + 1 < max_y:
+            stdscr.addstr(base_y, cx - 1, '│', curses.color_pair(3))
+            stdscr.addstr(base_y + 1, max(0, cx - 5), '╱────╲', curses.color_pair(3))
+    except curses.error:
+        pass
+
+
 def render_clock_stars(stdscr, frame):
     render_starfield(stdscr, frame)
     render_clock(stdscr, frame)
@@ -1742,6 +1775,7 @@ def render_matrix(stdscr, frame):
 # Patch callables into ART_OPTIONS after function definitions
 ART_OPTIONS[1] = ("CLOCK + STARS", render_clock_stars, "CLOCK")
 ART_OPTIONS[2] = ("MATRIX RAIN",   render_matrix,      "MATRIX")
+ART_OPTIONS[3] = ("SPINNING FAN",  render_fan,         "FAN")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -2139,8 +2173,8 @@ def main(stdscr):
                     current_view = "MENU"
                 elif art_key == "GAMES":
                     current_view = "GAMES_MENU"
-                elif art_key in ("CLOCK","MATRIX"):
-                    fn = render_clock_stars if art_key=="CLOCK" else render_matrix
+                elif art_key in ("CLOCK","MATRIX","FAN"): 
+                    fn = (render_clock_stars if art_key == "CLOCK" else render_matrix if art_key == "MATRIX" else render_fan)
                     active_art_type = fn
                     art_stop_time   = time.time()+dur_sec if dur_sec else None
                     current_view    = "ART_RUNNING"
