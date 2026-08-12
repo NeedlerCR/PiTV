@@ -2,7 +2,8 @@ name: Add experimental fan display
 
 on:
   push:
-    branches: [experimental]
+    branches:
+      - experimental
 
 permissions:
   contents: write
@@ -13,147 +14,110 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Add fan renderer and command
-        shell: python
+
+      - name: Patch PiTV fan renderer
         run: |
+          python3 <<'PY'
           from pathlib import Path
           import re
 
           tv = Path('tv_menu.py')
           s = tv.read_text()
 
-          # Add FAN to the external renderer table. The fan is a curses renderer,
-          # so it runs inside the existing PiTV display process rather than in SSH.
-          old = '''EXTERNAL_CMDS = {
-              "FIRE": (["cacafire"], {"CACA_GEOMETRY": "80x40", "CACA_DELAY": "150000"}),
-          }'''
-          new = '''EXTERNAL_CMDS = {
-              "FIRE": (["cacafire"], {"CACA_GEOMETRY": "80x40", "CACA_DELAY": "150000"}),
-          }'''
-          # FAN is deliberately handled as an internal renderer below.
-          if old not in s:
-              raise SystemExit('EXTERNAL_CMDS anchor not found')
-
-          old_opts = '''ART_OPTIONS = [
-              ("FIRE",          "FIRE",   "FIRE"),
-              ("CLOCK + STARS", None,     "CLOCK"),
-              ("MATRIX RAIN",   None,     "MATRIX"),
-              ("SCREEN MIRROR", "MIRROR", "MIRROR"),
-              ("GAMES",         "GAMES",  "GAMES"),
-          ]'''
-          new_opts = '''ART_OPTIONS = [
-              ("FIRE",          "FIRE",   "FIRE"),
-              ("CLOCK + STARS", None,     "CLOCK"),
-              ("MATRIX RAIN",   None,     "MATRIX"),
-              ("SPINNING FAN",  None,     "FAN"),
-              ("SCREEN MIRROR", "MIRROR", "MIRROR"),
-              ("GAMES",         "GAMES",  "GAMES"),
-          ]'''
-          if old_opts not in s:
-              raise SystemExit('ART_OPTIONS anchor not found')
-          s = s.replace(old_opts, new_opts, 1)
-
-          renderer = r'''
-
-
-def render_fan(stdscr, frame):
-    """Animated four-blade desk fan rendered entirely by curses."""
-    max_y, max_x = stdscr.getmaxyx()
-    cx, cy = max_x // 2, max_y // 2
-    radius = max(4, min(max_x // 4, max_y // 2 - 2))
-
-    stdscr.erase()
-    angle = (frame * 0.32) % (2 * math.pi)
-
-    # Draw four rounded blades from the hub. Each blade is sampled along a
-    # slightly curved path, making the rotation readable even on character cells.
-    for blade in range(4):
-        a = angle + blade * (math.pi / 2)
-        for step in range(1, radius + 1):
-            r = step / radius
-            spread = 0.16 + 0.34 * r
-            for off in (-spread, 0.0, spread):
-                x = int(round(cx + math.cos(a + off) * step * 1.55))
-                y = int(round(cy + math.sin(a + off) * step * 0.82))
-                if 0 <= x < max_x and 0 <= y < max_y:
-                    try:
-                        stdscr.addch(y, x, '█', curses.color_pair(2) | curses.A_BOLD)
-                    except curses.error:
-                        pass
-
-    # Hub and small stand/base.
-    try:
-        stdscr.addch(cy, cx, '●', curses.color_pair(4) | curses.A_BOLD)
-        if cy + radius + 1 < max_y:
-            stdscr.addstr(cy + radius // 2 + 2, cx - 1, '│', curses.color_pair(3))
-            stdscr.addstr(cy + radius // 2 + 3, max(0, cx - 5), '╱────╲', curses.color_pair(3))
-    except curses.error:
-        pass
-'''
-          anchor = '\n\ndef render_clock_stars(stdscr, frame):'
           if 'def render_fan(stdscr, frame):' not in s:
+              renderer = r'''
+
+          def render_fan(stdscr, frame):
+              """Animated four-blade fan rendered by the existing curses display."""
+              max_y, max_x = stdscr.getmaxyx()
+              cx, cy = max_x // 2, max_y // 2
+              radius = max(4, min(max_x // 4, max_y // 2 - 3))
+              angle = (frame * 0.32) % (2 * math.pi)
+
+              stdscr.erase()
+              for blade in range(4):
+                  a = angle + blade * (math.pi / 2)
+                  for step in range(1, radius + 1):
+                      r = step / radius
+                      spread = 0.12 + 0.28 * r
+                      for off in (-spread, 0.0, spread):
+                          x = int(round(cx + math.cos(a + off) * step * 1.45))
+                          y = int(round(cy + math.sin(a + off) * step * 0.72))
+                          if 0 <= x < max_x and 0 <= y < max_y:
+                              try:
+                                  stdscr.addch(y, x, '█', curses.color_pair(2) | curses.A_BOLD)
+                              except curses.error:
+                                  pass
+
+              try:
+                  stdscr.addch(cy, cx, '●', curses.color_pair(4) | curses.A_BOLD)
+                  base_y = min(max_y - 2, cy + radius + 2)
+                  if base_y + 1 < max_y:
+                      stdscr.addstr(base_y, cx - 1, '│', curses.color_pair(3))
+                      stdscr.addstr(base_y + 1, max(0, cx - 5), '╱────╲', curses.color_pair(3))
+              except curses.error:
+                  pass
+          '''
+              anchor = '\n\ndef render_clock_stars(stdscr, frame):'
               if anchor not in s:
-                  raise SystemExit('renderer anchor not found')
+                  raise SystemExit('FAIL: render_clock_stars insertion anchor not found')
               s = s.replace(anchor, renderer + anchor, 1)
 
-          patch = '''# Patch callables into ART_OPTIONS after function definitions
-ART_OPTIONS[1] = ("CLOCK + STARS", render_clock_stars, "CLOCK")
-ART_OPTIONS[2] = ("MATRIX RAIN",   render_matrix,      "MATRIX")'''
-          patch_new = '''# Patch callables into ART_OPTIONS after function definitions
-ART_OPTIONS[1] = ("CLOCK + STARS", render_clock_stars, "CLOCK")
-ART_OPTIONS[2] = ("MATRIX RAIN",   render_matrix,      "MATRIX")
-ART_OPTIONS[3] = ("SPINNING FAN",  render_fan,         "FAN")'''
-          if patch not in s:
-              raise SystemExit('renderer patch anchor not found')
-          s = s.replace(patch, patch_new, 1)
+          opts = re.compile(r'ART_OPTIONS = \[.*?\n\]', re.S)
+          m = opts.search(s)
+          if not m:
+              raise SystemExit('FAIL: ART_OPTIONS block not found')
+          block = m.group(0)
+          if '"SPINNING FAN"' not in block:
+              needle = '("MATRIX RAIN",   None,     "MATRIX"),'
+              if needle not in block:
+                  raise SystemExit('FAIL: MATRIX ART_OPTIONS entry not found')
+              block = block.replace(needle, needle + '\n    ("SPINNING FAN",  None,     "FAN"),', 1)
+              s = s[:m.start()] + block + s[m.end():]
 
-          direct_old = '''                elif art_key in ("CLOCK","MATRIX"):
-                    fn = render_clock_stars if art_key=="CLOCK" else render_matrix
-                    active_art_type = fn'''
-          direct_new = '''                elif art_key in ("CLOCK","MATRIX","FAN"):
-                    fn = (render_clock_stars if art_key == "CLOCK" else
-                          render_matrix if art_key == "MATRIX" else render_fan)
-                    active_art_type = fn'''
-          if direct_old not in s:
-              raise SystemExit('DIRECT_RUN renderer anchor not found')
-          s = s.replace(direct_old, direct_new, 1)
+          patch = '("MATRIX RAIN",   render_matrix,      "MATRIX")'
+          if '("SPINNING FAN",  render_fan' not in s:
+              if patch not in s:
+                  raise SystemExit('FAIL: ART_OPTIONS callable patch anchor not found')
+              s = s.replace(patch, patch + '\nART_OPTIONS[3] = ("SPINNING FAN",  render_fan,         "FAN")', 1)
 
-          duration_old = '''                    else:
-                        active_art_type = art_type
-                        art_stop_time   = time.time()+dur_sec if dur_sec else None
-                        current_view    = "ART_RUNNING"'''
-          if duration_old not in s:
-              raise SystemExit('duration renderer anchor not found')
+          # Make the RUN handler recognise FAN wherever the existing clock/matrix
+          # renderer selection is performed.
+          if '"FAN"' not in s[s.find('def render_fan'):]:
+              raise SystemExit('FAIL: fan renderer was not inserted')
+
+          old = 'elif art_key in ("CLOCK","MATRIX"):'
+          if old in s:
+              new = 'elif art_key in ("CLOCK","MATRIX","FAN"): '
+              s = s.replace(old, new, 1)
+              old_fn = 'fn = render_clock_stars if art_key=="CLOCK" else render_matrix'
+              new_fn = 'fn = (render_clock_stars if art_key == "CLOCK" else render_matrix if art_key == "MATRIX" else render_fan)'
+              if old_fn in s:
+                  s = s.replace(old_fn, new_fn, 1)
+          else:
+              # Some revisions use spacing/formatting variations. Patch the
+              # corresponding conditional structurally instead of requiring one
+              # exact line.
+              pat = re.compile(r'elif art_key in \(\s*["\']CLOCK["\']\s*,\s*["\']MATRIX["\']\s*\):')
+              s, n = pat.subn('elif art_key in ("CLOCK", "MATRIX", "FAN"):', s, count=1)
+              if n == 0:
+                  raise SystemExit('FAIL: RUN renderer conditional anchor not found')
+              s = s.replace('fn = render_clock_stars if art_key=="CLOCK" else render_matrix', new_fn, 1)
 
           tv.write_text(s)
 
           cli = Path('screen')
           c = cli.read_text()
-          c_old = '''  screen matrix [seconds]
-'''
-          c_new = '''  screen matrix [seconds]
-  screen fan [seconds]
-'''
-          if c_old not in c:
-              raise SystemExit('screen usage anchor not found')
-          c = c.replace(c_old, c_new, 1)
-          c_old = '''    fire|clock|matrix)
-        DUR="${2:-INDEFINITE}"
-        _send "RUN ${CMD^^} ${DUR}"
-        ;;
-'''
-          c_new = '''    fire|clock|matrix|fan)
-        DUR="${2:-INDEFINITE}"
-        _send "RUN ${CMD^^} ${DUR}"
-        ;;
-'''
-          if c_old not in c:
-              raise SystemExit('screen command anchor not found')
-          c = c.replace(c_old, c_new, 1)
+          if 'screen fan [seconds]' not in c:
+              c = c.replace('  screen matrix [seconds]\n', '  screen matrix [seconds]\n  screen fan [seconds]\n', 1)
+          c = c.replace('fire|clock|matrix)', 'fire|clock|matrix|fan)', 1)
           cli.write_text(c)
+          PY
 
-      - name: Commit fan display
+      - name: Validate and commit
         run: |
+          python3 -m py_compile tv_menu.py
+          bash -n screen
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add tv_menu.py screen
