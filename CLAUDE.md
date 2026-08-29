@@ -40,11 +40,15 @@ screen is blocked. Only `screen unlock authorise <emergency code>` clears it
    WASD + F/G. `run_game()` passes the game binary as `argv[1]`, so a few games
    get tailored buttons: **nudoku** (right button types a number by pressing it
    that many times, top = hint, bottom/B = remove) and **freesweep** (right =
-   reveal, top = flag). For **vitetris** 2-player on a single pad, the left
-   stick is P1 and the right stick is P2 (WASD) — unless `screen remote` is on,
-   in which case P2 is the SSH keyboard and the whole pad stays P1
-   (`_remote_running()` decides). vitetris's Player-2 keys must be set to
-   W/A/S/D (+ rotate) once in its own Options menu for this to reach P2.
+   reveal, top = flag). For **vitetris** 2-player on a single pad the
+   pad is split by *control surface*, so the two players can't fight over the
+   same axis: the **D-pad is P1** (arrows, L shoulder rotates) and **either
+   analog stick is P2** (WASD, R shoulder rotates). A pad with no real D-pad
+   (ABS_HAT0X absent) falls back to the old split — left stick P1, right stick
+   P2. Unless `screen remote` is on, in which case P2 is the SSH keyboard and
+   the whole pad stays P1 (`_remote_running()` decides). vitetris's Player-2
+   keys must be set to W/A/S/D (+ rotate) once in its own Options menu for this
+   to reach P2.
 3. **CEC remote** (`listen_cec_remote`) and the **FIFO** `/tmp/tv_menu.fifo`
    (written by the `screen` CLI, `remote.py`, and the web portals) also feed
    `input_queue`. During an external game, FIFO nav tokens and `TYPE <char>`
@@ -118,15 +122,25 @@ Needs `uxplay` + gstreamer plugins + `avahi-daemon` (mDNS).
 *not* inside the bridge. It talks to `tv_menu.py` over a **localhost UDP
 datagram** to `127.0.0.1:8129` (the `listen_cec_udp` thread), which accepts:
 `TV_ON`/`TV_OFF` (power → `cec-cmd.sh on 0`/`standby 0`), `CEC tx <frame>`
-(input switching via a whitelisted raw CEC frame), and `KEY <TOKEN>` (menu
+(input switching via a whitelisted raw CEC frame), `KEY <TOKEN>` (menu
 navigation, so the **Apple Home / Control Centre remote** drives the menu by
-feeding `input_queue`). UDP is used because the official Homebridge service is
-sandboxed (`ProtectSystem=strict`) and can't write a `/tmp` FIFO, but it can
-always send a localhost packet. `tv_menu.py` owns the CEC bus and runs
-`cec-cmd.sh` itself with output suppressed (so it never scribbles on the menu).
+feeding `input_queue`), and `JOKE_ON`/`JOKE_OFF` (see below). UDP is used
+because the official Homebridge service is sandboxed (`ProtectSystem=strict`)
+and can't write a `/tmp` FIFO, but it can always send a localhost packet.
+`tv_menu.py` owns the CEC bus and runs `cec-cmd.sh` itself with output
+suppressed (so it never scribbles on the menu).
 Power state is bidirectional: `listen_cec_remote` polls the TV's CEC power
 status and writes `on`/`off` to `/tmp/pitv-tv-state`, which the plugin reads +
 polls so the physical remote is reflected in the Home app.
+
+**Joke Mode** is a bridged switch (alongside the kill switch and Guest Mode):
+while it's on, `_set_joke_mode` waits a random **10–50 minutes**, sends one CEC
+standby so the TV appears to die on its own, then picks a fresh delay and
+repeats. Unlike the kill switch it never re-sends standby, so the TV can just be
+switched back on. State lives in `/tmp/pitv-joke-mode` (cleared at boot, so a
+reboot never comes back still pranking); the plugin polls it, and
+`screen joke on|off|status` drives the same thing over the FIFO.
+
 `deploy.sh` reinstalls the plugin into Homebridge (npm copies it at install
 time, so refreshing `/opt/pitv` alone isn't enough).
 (`tv-state.sh` was the older homebridge-cmd4 approach and is superseded.)

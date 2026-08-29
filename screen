@@ -6,6 +6,7 @@ set -euo pipefail
 FIFO="/tmp/tv_menu.fifo"
 REMOTE_SCRIPT="/opt/pitv/remote.py"
 TV_INPUT_FILE="/tmp/pitv-tv-input"
+JOKE_STATE_FILE="/tmp/pitv-joke-mode"
 PI_INPUT="20:00"   # HDMI 2
 SKY_INPUT="10:00"  # HDMI 1
 
@@ -49,6 +50,8 @@ Player PINs (unlock locked games; the log records who played):
 System:
   screen version                        show the PiTV version
   screen unlock authorise <code>        clear a full lockdown
+  screen joke on|off|status             joke mode: after a random 10-50 min
+                                        the TV "dies" on its own, then again
 
 Guest web portal (port 8080, only when Home 'Guest Mode' is on):
   screen guest password set <name> <pw> create/update a guest login
@@ -189,6 +192,32 @@ case "$CMD" in
 
     version)
         cat /opt/pitv/VERSION 2>/dev/null || echo "unknown"
+        ;;
+
+    joke)
+        case "${2:-}" in
+            on)
+                _send_raw "JOKE_ON"
+                echo "Joke mode armed — the TV will drop out in 10-50 minutes."
+                ;;
+            off)
+                _send_raw "JOKE_OFF"
+                echo "Joke mode off."
+                ;;
+            status|"")
+                STATE=""
+                if [[ -f "$JOKE_STATE_FILE" ]]; then
+                    STATE="$(tr -d '[:space:]' < "$JOKE_STATE_FILE")"
+                fi
+                if [[ "$STATE" == "on" ]]; then
+                    echo "Joke mode: ON"
+                else
+                    echo "Joke mode: off"
+                fi
+                ;;
+            *)
+                echo "Usage: screen joke on|off|status" >&2; exit 1 ;;
+        esac
         ;;
 
     unlock)

@@ -23,7 +23,7 @@ except ImportError:
     EVDEV_OK = False
 
 # ChronosVer: vYYYY.MAJOR.MINOR.BUG
-VERSION = "v2026.2.3.1"
+VERSION = "v2026.2.4.0"
 
 # ─────────────────────────────────────────────────────────────────────
 # LOG SYSTEM
@@ -519,6 +519,11 @@ def listen_fifo():
                         _run_cec_cmd("on 0" if cmd == "TV_ON" else "standby 0")
                         continue
 
+                    # `screen joke on|off` — the same prank the Home switch arms.
+                    if cmd in ("JOKE_ON", "JOKE_OFF"):
+                        _set_joke_mode(cmd == "JOKE_ON")
+                        continue
+
                     # `screen unlock authorise <code>` clears a hard lockdown.
                     if cmd.startswith("UNLOCK "):
                         code = raw.split(" ", 1)[1].strip() if " " in raw else ""
@@ -702,6 +707,62 @@ def _set_kill_switch(on):
         log("Kill switch OFF")
 
 
+# ── Joke mode ────────────────────────────────────────────────────────
+# A prank switch: while it's on, wait a random 10–50 minutes, then quietly
+# ask the TV to go to standby, pick a fresh delay and do it again. The TV
+# looks like it's dying of its own accord rather than being switched off,
+# which is the whole joke. Unlike the kill switch it never re-sends standby,
+# so whoever's watching can just turn the TV straight back on.
+JOKE_MIN_MINUTES = 10
+JOKE_MAX_MINUTES = 50
+JOKE_STATE_FILE  = "/tmp/pitv-joke-mode"
+
+_joke_stop   = threading.Event()
+_joke_thread = None
+
+
+def _write_joke_state(on):
+    """Publish joke mode so the Homebridge switch (and `screen joke status`)
+    can see it — same pattern as /tmp/pitv-guest-mode."""
+    try:
+        with open(JOKE_STATE_FILE, "w") as f:
+            f.write("on" if on else "off")
+    except OSError:
+        pass
+
+
+def _set_joke_mode(on):
+    """HomeKit 'Joke Mode'. On: loop forever picking a random delay between
+    JOKE_MIN_MINUTES and JOKE_MAX_MINUTES and sending one CEC standby when it
+    expires. Off: stop; a delay already counting down is abandoned."""
+    global _joke_thread
+    if on:
+        if _joke_thread and _joke_thread.is_alive():
+            return
+        _joke_stop.clear()
+        _write_joke_state(True)
+
+        def _loop():
+            while not _joke_stop.is_set():
+                mins = random.randint(JOKE_MIN_MINUTES, JOKE_MAX_MINUTES)
+                log(f"Joke mode: TV off in {mins} min")
+                if _joke_stop.wait(mins * 60):
+                    return                     # switched off mid-countdown
+                log("Joke mode: TV off")
+                _run_cec_cmd("standby 0")      # one nudge, not the kill switch
+
+        _joke_thread = threading.Thread(target=_loop, daemon=True)
+        _joke_thread.start()
+        log("Joke mode ON")
+    else:
+        _joke_stop.set()
+        _write_joke_state(False)
+        log("Joke mode OFF")
+
+
+_write_joke_state(False)      # never come back from a reboot still pranking
+
+
 _hardlock_stop = threading.Event()
 
 
@@ -873,6 +934,7 @@ def listen_cec_udp():
     send a localhost datagram. Accepted messages:
       TV_ON / TV_OFF     -> CEC power on / standby (this process owns the bus)
       KILL_ON / KILL_OFF -> kill switch (keep the TV forced off)
+      JOKE_ON / JOKE_OFF -> joke mode (TV "dies" after a random 10-50 min)
       CEC tx <frame>     -> raw CEC frame, e.g. input switching (whitelisted)
       KEY <TOKEN>        -> Apple Home / Control Centre remote. In the menu and
                             built-in games it feeds input_queue; during an
@@ -901,6 +963,8 @@ def listen_cec_udp():
                 _run_cec_cmd("on 0" if up == "TV_ON" else "standby 0")
             elif up in ("KILL_ON", "KILL_OFF"):
                 _set_kill_switch(up == "KILL_ON")
+            elif up in ("JOKE_ON", "JOKE_OFF"):
+                _set_joke_mode(up == "JOKE_ON")
             elif up in ("GUEST_ON", "GUEST_OFF"):
                 # Gate the guest web portal (it reads this file).
                 state = "on" if up == "GUEST_ON" else "off"

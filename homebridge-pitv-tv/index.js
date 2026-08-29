@@ -8,6 +8,8 @@
 //     navigation of the PiTV menu.
 //   - a *Kill Switch* (bridged Switch): while on, tv_menu keeps forcing the
 //     TV off; turning it off stops that.
+//   - a *Joke Mode* switch (bridged Switch): while on, tv_menu waits a random
+//     10-50 minutes and then drops the TV to standby, over and over.
 //
 // Everything is sent to tv_menu.py as a localhost UDP datagram
 // (127.0.0.1:8129). The official Homebridge service is sandboxed
@@ -17,6 +19,7 @@
 //   CEC <tx frame>        -> input switching
 //   KEY <TOKEN>           -> menu navigation
 //   KILL_ON | KILL_OFF    -> kill switch
+//   JOKE_ON | JOKE_OFF    -> joke mode
 
 const dgram = require('dgram');
 const fs    = require('fs');
@@ -31,6 +34,9 @@ const TV_STATE_FILE = '/tmp/pitv-tv-state';
 // tv_menu.py writes the TV's active input (CEC physical address like "10:00")
 // here, so the Home app's input selection reflects reality.
 const TV_INPUT_FILE = '/tmp/pitv-tv-input';
+// tv_menu.py writes joke mode's real state here (it clears it on boot, and
+// `screen joke on|off` flips it too), so the Home switch stays honest.
+const JOKE_STATE_FILE = '/tmp/pitv-joke-mode';
 
 // Broadcast "Active Source = <physical address>" so the TV switches input.
 // Initiator "1" = the Pi's CEC logical address (libcec registers as Recorder 1
@@ -68,11 +74,13 @@ class PiTVTelevisionPlatform {
     this.activeInput = 1;
     this.killOn      = false;
     this.guestOn     = false;
+    this.jokeOn      = false;
 
     this.api.on('didFinishLaunching', () => {
       this.publishTelevision();
       this.ensureKillSwitch();
       this.ensureGuestSwitch();
+      this.ensureJokeSwitch();
     });
   }
 
@@ -270,5 +278,40 @@ class PiTVTelevisionPlatform {
       }
     }, 4000);
     this.log.info(`Guest Mode switch ready.`);
+  }
+
+  // Bridged Switch: the prank. While on, tv_menu waits a random 10-50 minutes
+  // and then sends one CEC standby, then picks a new delay and repeats.
+  ensureJokeSwitch() {
+    const name = 'Joke Mode';
+    const uuid = this.api.hap.uuid.generate(`${PLUGIN_NAME}:jokemode`);
+    let acc = this.accessories.find((a) => a.UUID === uuid);
+    if (!acc) {
+      acc = new this.api.platformAccessory(name, uuid);
+      acc.addService(Service.Switch, name);
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [acc]);
+      this.accessories.push(acc);
+    }
+    const svc = acc.getService(Service.Switch)
+      || acc.addService(Service.Switch, name);
+    const readJoke = () => {
+      try { return fs.readFileSync(JOKE_STATE_FILE, 'utf8').trim() === 'on'; }
+      catch (e) { return null; }
+    };
+    const jokeChar = svc.getCharacteristic(Characteristic.On)
+      .onGet(() => { const j = readJoke(); return j === null ? this.jokeOn : j; })
+      .onSet((value) => {
+        this.jokeOn = value;
+        this.send(value ? 'JOKE_ON' : 'JOKE_OFF');
+      });
+    // Reflect `screen joke on|off` (and the boot-time reset) back into Home.
+    setInterval(() => {
+      const j = readJoke();
+      if (j !== null && j !== this.jokeOn) {
+        this.jokeOn = j;
+        jokeChar.updateValue(j);
+      }
+    }, 4000);
+    this.log.info(`Joke Mode switch ready.`);
   }
 }
