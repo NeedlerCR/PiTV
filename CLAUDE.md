@@ -251,8 +251,8 @@ above), or with an NFC link `/nfc?t=<token>` (a tap is already proof of
 presence, so it signs straight in; 1-week HMAC-signed cookie that redirects to
 hide the URL). They see their assigned player PIN (rotates weekly — checked on
 each page load, not just at startup — or via `screen pin guest rotate all`),
-and cannot use the kill switch or admin. Both portals throttle failed logins (and bad NFC tokens)
-per client IP with a doubling lockout, cap request bodies, send a CSP plus
+and cannot use the kill switch or admin. Both portals throttle failed logins
+(and bad NFC tokens) per client IP with a doubling lockout, cap request bodies, send a CSP plus
 `nosniff`/`DENY`/`no-referrer`, and refuse a cross-origin POST.
 Actuation: TV/input via the 8129 UDP channel, menu nav by writing the FIFO.
 Data lives in `~/.pitv/guests.json` + `~/.pitv/pins.json` (device-only).
