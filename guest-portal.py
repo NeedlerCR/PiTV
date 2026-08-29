@@ -62,6 +62,8 @@ ADMIN_SECRET    = os.path.join(PITV_DIR, "admin-secret")
 SECRET_FILE     = ADMIN_SECRET if ADMIN else GUEST_SECRET
 GUEST_MODE_FILE = "/tmp/pitv-guest-mode"
 SKY_FILE        = os.path.join(PITV_DIR, "sky.json")
+# tv_menu writes the pairing code here; we only ever read it.
+PAIR_FILE       = os.path.join(PITV_DIR, "pairing.json")
 # Which client addresses may reach the portals at all (`screen network ...`).
 # Empty list = anyone who can route to the Pi, which is the historical
 # behaviour; add a CIDR to shut out, say, a VPN range.
@@ -70,6 +72,13 @@ FIFO            = "/tmp/tv_menu.fifo"
 UDP_ADDR        = ("127.0.0.1", 8129)
 # Admin sessions effectively never expire; guest sessions last a week.
 SESSION_MAX_AGE = (3650 if ADMIN else 7) * 24 * 3600
+# A guest who paired off the TV screen instead of being given a password gets a
+# few hours, not a week — long enough for an evening, short enough that a
+# visitor doesn't keep access after they have gone home.
+PAIR_SESSION_AGE = 6 * 3600
+PAIR_PREFIX      = "pair:"
+# Don't let anyone flash the code onto the TV over and over.
+PAIR_SHOW_COOL   = 20
 ROTATE_PERIOD   = 7 * 24 * 3600
 
 # Login throttling. The guest portal takes a password with no username, so it
@@ -267,6 +276,7 @@ def check_admin(username, password):
 # ── login throttling ─────────────────────────────────────────────────
 _fail_state = {}                  # ip -> {"fails": n, "until": ts, "seen": ts}
 _fail_lock  = threading.Lock()
+_last_pair_show = 0.0             # global cooldown on "show it on the TV"
 
 
 def _throttle_until(ip):
@@ -320,8 +330,8 @@ def user_for_token(token):
     return None
 
 
-def sign_session(username):
-    exp = int(time.time()) + SESSION_MAX_AGE
+def sign_session(username, max_age=None):
+    exp = int(time.time()) + (max_age or SESSION_MAX_AGE)
     payload = f"{username}|{exp}".encode()
     sig = hmac.new(get_secret(), payload, hashlib.sha256).hexdigest()
     return base64.urlsafe_b64encode(payload).decode() + "." + sig
@@ -337,6 +347,11 @@ def verify_session(cookie_val):
         user, exp = payload.decode().split("|")
         if int(exp) < time.time():
             return None
+        if user.startswith(PAIR_PREFIX):
+            # Paired guests aren't in guests.json — the signature and the
+            # expiry are what vouch for them. `screen guest kick all` still
+            # ends these, since it rotates the key this cookie is signed with.
+            return None if ADMIN else user
         return user if user in valid_users() else None
     except Exception:
         return None
@@ -354,6 +369,31 @@ def send_udp(msg):
         s.close()
     except Exception:
         pass
+
+
+# ── pairing (a code shown on the TV) ─────────────────────────────────
+def pair_enabled():
+    d = _load(PAIR_FILE, {})
+    return bool(d) and d.get("enabled", True)
+
+
+def check_pairing(code):
+    """A 6-digit code that matches the one currently on the TV screen buys a
+    short session. Whoever typed it could see the telly, which is the whole
+    point — someone who has merely reached the network cannot."""
+    if not code or not code.isdigit() or len(code) != 6:
+        return None
+    d = _load(PAIR_FILE, {})
+    if not d.get("enabled", True):
+        return None
+    live = str(d.get("code", ""))
+    if not live or d.get("expires", 0) < time.time():
+        return None
+    if not hmac.compare_digest(code, live):
+        return None
+    # A name that is obviously a paired guest in the log, and unique per device
+    # so two visitors don't share one identity.
+    return PAIR_PREFIX + secrets.token_hex(3)
 
 
 def sky_on():
@@ -445,17 +485,34 @@ def page(body):
     return PAGE.format(body=body, who="Admin" if ADMIN else "Guest")
 
 
-def login_body(err=""):
+def login_body(err="", note=""):
     e = f'<p style="color:#ff8a8a">{html.escape(err)}</p>' if err else ""
+    n = f'<p style="color:#8fe3a5">{html.escape(note)}</p>' if note else ""
     userfield = ('<input name=username placeholder="Username" autofocus>'
                  if ADMIN else "")
     title = "PiTV Admin" if ADMIN else "PiTV Guest"
-    hint = "Sign in." if ADMIN else "Enter the guest password."
+    paired = (not ADMIN) and pair_enabled()
+    if ADMIN:
+        hint  = "Sign in."
+        field = "Password"
+    elif paired:
+        hint  = "Type the code shown on the TV, or your guest password."
+        field = "Code on the TV, or password"
+    else:
+        hint  = "Enter the guest password."
+        field = "Password"
+    # Shown signed out on purpose: reading the code still needs line of sight
+    # to the telly, and that is the credential.
+    button = ('<form method=post action="/pair/show">'
+              '<button type=submit>Show the code on the TV</button></form>'
+              if paired else "")
     return (f"<h1>{title}</h1><p class=muted>{hint}</p>"
-            f'<div class=card><form method=post action="/login">{e}{userfield}'
-            f'<input type=password name=password placeholder="Password"'
-            f'{"" if ADMIN else " autofocus"}>'
-            f'<button type=submit>Sign in</button></form></div>')
+            f'<div class=card><form method=post action="/login">{e}{n}{userfield}'
+            f'<input type=password name=password placeholder="{field}"'
+            f'{"" if ADMIN else " autofocus"} inputmode='
+            f'{"numeric" if paired else "text"}>'
+            f'<button type=submit>Sign in</button></form>'
+            f'{button}</div>')
 
 
 def gate_body():
@@ -468,7 +525,8 @@ def controls_body(username):
     # Look the PIN up with the real name; escape only for display, so a name
     # with an & or < in it still resolves AND can't inject markup.
     pin  = html.escape(str(guest_pin(username)))
-    name = html.escape(username)
+    name = ("a guest (paired from the TV)" if username.startswith(PAIR_PREFIX)
+            else html.escape(username))
     if ADMIN:
         gm = guest_mode_on()
         pin_card = (f'<div class=card><p class=muted>Your game PIN</p>'
@@ -481,9 +539,10 @@ def controls_body(username):
                 f'<button class=off onclick="act(\'guest_off\')">Guest Mode Off</button>'
                 f'</div></div>')
     else:
+        pin_card = (f"<div class=card><p class=muted>Your game PIN</p>"
+                    f'<div class=pin>{pin}</div></div>') if pin != "—" else ""
         head = (f"<h1>PiTV Guest</h1><p class=muted>Signed in as {name}</p>"
-                f"<div class=card><p class=muted>Your game PIN</p>"
-                f'<div class=pin>{pin}</div></div>')
+                + pin_card)
     sky = ""
     if sky_on():
         rows = "".join(
@@ -640,15 +699,43 @@ class Handler(BaseHTTPRequestHandler):
             b = self._body()
             if b is None:
                 self.send_response(413); self.end_headers(); return
-            user = (check_admin(b.get("username", ""), b.get("password", ""))
-                    if ADMIN else check_password(b.get("password", "")))
+            secret = b.get("password", "")
+            age    = SESSION_MAX_AGE
+            if ADMIN:
+                user = check_admin(b.get("username", ""), secret)
+            else:
+                # A pairing code first (it's the common case for a visitor),
+                # then the per-guest password.
+                user = check_pairing(secret)
+                if user:
+                    age = PAIR_SESSION_AGE
+                    print(f"paired {user} from {ip}", flush=True)
+                else:
+                    user = check_password(secret)
             if user:
                 _note_success(ip)
-                self._redirect("/", self._cookie(sign_session(user), SESSION_MAX_AGE))
+                self._redirect("/", self._cookie(sign_session(user, age), age))
             else:
                 _note_failure(ip)
-                self._html(login_body("Wrong login." if ADMIN else "Wrong password."),
-                           code=401)
+                self._html(login_body(
+                    "Wrong login." if ADMIN
+                    else "That code or password wasn't right."), code=401)
+            return
+
+        if path == "/pair/show" and not ADMIN:
+            # Signed out on purpose — but rate limited, so nobody on the
+            # network can sit there flashing the code onto the screen.
+            if not pair_enabled():
+                self._html(login_body("Pairing is switched off."), code=403)
+                return
+            global _last_pair_show
+            now = time.time()
+            if now - _last_pair_show < PAIR_SHOW_COOL:
+                self._html(login_body(note="It's on the TV now — look up."))
+                return
+            _last_pair_show = now
+            write_fifo("PAIR_SHOW")
+            self._html(login_body(note="Look at the TV, then type the code."))
             return
 
         if path == "/action":

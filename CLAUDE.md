@@ -172,6 +172,29 @@ reboot never comes back still pranking); the plugin polls it, and
 time, so refreshing `/opt/pitv` alone isn't enough).
 (`tv-state.sh` was the older homebridge-cmd4 approach and is superseded.)
 
+## Guest pairing (a code on the TV)
+
+How visitors get in without anyone digging out a password or a remote — and
+the answer to "someone VPNs in and drives our TV": **you have to be able to see
+the telly**.
+
+- `tv_menu` owns the code (it owns the screen): a 6-digit `secrets` code in
+  `~/.pitv/pairing.json` (0600) that rotates every 5 minutes, so a photo of the
+  TV goes stale. It sits dim in the corner of the menu (`draw_pair_hint`), and
+  the portal's **"Show the code on the TV"** button puts it up big for 30 s
+  (`draw_pair_overlay`). If the TV is on another input at that moment, PiTV
+  borrows it and switches back by itself — except during a game, when the
+  input is left alone.
+- The portal accepts the code in the same field as the guest password
+  (`check_pairing`) and grants a **6-hour** session (`PAIR_SESSION_AGE`), not
+  the week a password buys. Paired users are `pair:<id>`, are not in
+  `guests.json`, and are vouched for by the cookie signature alone — so
+  `screen guest kick all` still ends them, and the admin portal never accepts
+  one.
+- Wrong codes feed the same per-IP lockout as passwords, and `/pair/show` has
+  its own cooldown so nobody can sit there flashing the screen.
+- On by default. `screen pair status|show|on|off`.
+
 ## Authenticated commands
 
 Nothing drives the TV on trust any more:
