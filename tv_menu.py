@@ -1,15 +1,16 @@
 import curses
+import hmac
 import json
-import math
 import os
 import random
 import re
 import selectors
 import shutil
 import subprocess
-import sys
 import threading
 import time
+
+import pitv_secrets
 
 # ─────────────────────────────────────────────────────────────────────
 # OPTIONAL DEPENDENCIES
@@ -23,7 +24,7 @@ except ImportError:
     EVDEV_OK = False
 
 # ChronosVer: vYYYY.MAJOR.MINOR.BUG
-VERSION = "v2026.2.4.0"
+VERSION = "v2026.2.5.0"
 
 # ─────────────────────────────────────────────────────────────────────
 # LOG SYSTEM
@@ -63,12 +64,13 @@ def log_clear() -> None:
 # Locked games are opened with a personal PIN. PINs are managed from the CLI
 # (`screen pin assign|list|remove|rename|revoke`) and stored per-person in
 # PIN_FILE, so the log records WHO opened each game. The emergency code is a
-# master that always works.
+# master that always works; it lives in ~/.pitv/emergency-code (device-only,
+# read fresh on every check) and is set with `screen emergency set <code>`.
 
-EMERGENCY_CODE  = "159753"
 FREE_GAMES      = set()          # every game requires a PIN
 OTP_MAX_FAILS   = 3
 PIN_FILE        = os.path.expanduser("~/.pitv/pins.json")
+LOCK_STATE_FILE = os.path.expanduser("~/.pitv/lock-state.json")
 
 
 def load_pins() -> dict:
@@ -84,13 +86,22 @@ def load_pins() -> dict:
 
 def verify_pin(code: str):
     """Return the player's name for a valid PIN, 'Emergency' for the master
-    code, or None. (Free games never reach here.)"""
-    if code == EMERGENCY_CODE:
+    code, or None. (Free games never reach here.)
+
+    Comparisons are constant-time so a PIN can't be recovered a digit at a
+    time by timing the keypad."""
+    if not code:
+        return None
+    if pitv_secrets.check_emergency_code(code):
         return "Emergency"
+    match = None
     for name, pin in load_pins().items():
-        if code and code == pin:
-            return name
-    return None
+        try:
+            if hmac.compare_digest(code, pin):
+                match = name      # no early return: every PIN costs the same
+        except TypeError:
+            continue              # a hand-edited, non-ASCII PIN — just skip it
+    return match
 
 
 def set_highscore_name(binary: str, who: str) -> None:
@@ -477,6 +488,9 @@ def listen_controllers() -> None:
 
         except Exception as e:
             log(f"Controller error: {e}")
+            for d in gamepads.values():
+                try: d.close()
+                except Exception: pass
             _controller_scan_event.set()
             time.sleep(1)
 
@@ -527,7 +541,7 @@ def listen_fifo():
                     # `screen unlock authorise <code>` clears a hard lockdown.
                     if cmd.startswith("UNLOCK "):
                         code = raw.split(" ", 1)[1].strip() if " " in raw else ""
-                        if code == EMERGENCY_CODE and hard_locked:
+                        if hard_locked and pitv_secrets.check_emergency_code(code):
                             _clear_hardlock()
                         else:
                             log("UNLOCK rejected")
@@ -766,6 +780,39 @@ _write_joke_state(False)      # never come back from a reboot still pranking
 _hardlock_stop = threading.Event()
 
 
+def _save_lock_state():
+    """Persist the lockout to disk.
+
+    A lockdown that a power cycle clears isn't a lockdown — before this, pulling
+    the plug reset `hard_locked` to False and the Pi came back to a usable menu.
+    Now the state is written whenever it changes and restored at startup."""
+    try:
+        os.makedirs(os.path.dirname(LOCK_STATE_FILE), exist_ok=True)
+        with open(LOCK_STATE_FILE, "w") as f:
+            json.dump({"hard": hard_locked, "locked": system_locked}, f)
+        os.chmod(LOCK_STATE_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def _restore_lock_state():
+    """Called once at startup: come back up in whatever lock state we left in."""
+    global system_locked, current_view
+    try:
+        with open(LOCK_STATE_FILE) as f:
+            st = json.load(f)
+    except Exception:
+        return
+    if st.get("hard"):
+        log("Lockdown restored after restart — still locked down")
+        _start_hardlock()
+        current_view = "HARDLOCK"
+    elif st.get("locked"):
+        system_locked = True
+        current_view  = "LOCKED"
+        log("Lockout restored after restart")
+
+
 def _start_hardlock():
     """Escalated lockdown (emergency code failed 3x): force the TV off every
     7 s and block the screen. Only `screen unlock authorise <code>` clears it."""
@@ -784,6 +831,7 @@ def _start_hardlock():
             _run_cec_cmd("standby 0")          # kill switch: force TV off
             _hardlock_stop.wait(7)
     threading.Thread(target=_loop, daemon=True).start()
+    _save_lock_state()
     log("HARD LOCK engaged — screen blocked; TV forced off in 15s (then every 7s)")
 
 
@@ -798,10 +846,14 @@ def _clear_hardlock():
     system_locked  = False
     otp_fail_count = lock_fail_count = 0
     lock_entered   = lock_error = ""
+    _save_lock_state()
     _run_cec_cmd("on 0")
     _run_cec_cmd("tx 1f:82:20:00")             # switch to PiTV (HDMI 2)
     current_view = "MENU"
     log("Authorised — hard lock cleared, TV on, input PiTV")
+
+
+_restore_lock_state()
 
 
 _remote_ui       = None
@@ -1007,6 +1059,10 @@ threading.Thread(target=listen_controllers, daemon=True).start()
 threading.Thread(target=listen_cec_udp,     daemon=True).start()
 
 log("PiTV started")
+
+if pitv_secrets.is_default_emergency_code():
+    log("WARNING: emergency code is still the one published in git — "
+        "rotate it with: screen emergency set <6 digits>")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1589,7 +1645,8 @@ def run_mirror(stdscr):
     _reset_terminal()
     os.system("clear")
 
-    if not resolve_binary("uxplay"):
+    uxplay_bin = resolve_binary("uxplay")
+    if not uxplay_bin:
         print("\nuxplay is not installed. Install it with:\n"
               "  sudo apt install uxplay gstreamer1.0-plugins-bad \\\n"
               "      gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly\n"
@@ -1612,7 +1669,7 @@ def run_mirror(stdscr):
 
     def _launch(sink):
         return subprocess.Popen(
-            ["uxplay", "-n", "PiTV", "-vs", sink, "-avdec"],
+            [uxplay_bin, "-n", "PiTV", "-vs", sink, "-avdec"],
             stdout=logf, stderr=subprocess.STDOUT,
         )
 
@@ -1981,7 +2038,7 @@ def draw_keypad(stdscr, game_name, entered, error, is_lock=False):
     except curses.error:
         pass
 
-    disp = " ".join(d if is_lock else "_" for d in entered.ljust(6,"_"))
+    disp = " ".join("_" if d == "_" else "*" for d in entered.ljust(6, "_"))
     try:
         stdscr.addstr(3, max(0,(max_x-len(disp))//2), disp, curses.color_pair(4)|curses.A_BOLD)
     except curses.error:
@@ -2007,7 +2064,7 @@ def draw_keypad(stdscr, game_name, entered, error, is_lock=False):
             except curses.error:
                 pass
 
-    hint = "Open your authenticator app for the code"
+    hint = "Enter your player PIN"
     if is_lock:
         hint = "Enter emergency code to unlock system"
     controls = "D-pad/Stick: move   A: enter   B: delete (or back when empty)"
@@ -2161,9 +2218,10 @@ def main(stdscr):
                     if verify:
                         # A lockout is cleared ONLY by the emergency code —
                         # not by an ordinary player PIN.
-                        if entered == EMERGENCY_CODE:
+                        if pitv_secrets.check_emergency_code(entered):
                             system_locked = False
                             otp_fail_count = lock_fail_count = 0
+                            _save_lock_state()
                             log("System unlocked via emergency code")
                             current_view = "MENU"
                         else:
@@ -2349,6 +2407,7 @@ def main(stdscr):
                             if otp_fail_count >= OTP_MAX_FAILS:
                                 log("Max failures — system locked")
                                 system_locked = True
+                                _save_lock_state()
                                 current_view  = "LOCKED"
                             else:
                                 keypad_error   = f"WRONG PIN — {remaining} attempt(s) left"

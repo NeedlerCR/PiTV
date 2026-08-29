@@ -10,23 +10,31 @@ Invoked by `screen guest ...` and `screen pin guest rotate all`.
   screen pin guest rotate all                       fresh PINs for all guests
 
 Data (device-only, never committed): ~/.pitv/guests.json, ~/.pitv/pins.json
-Each guest has a hashed password, an NFC auto-login token, and a player PIN
-(shown in the portal, works on the game keypad).
+Each guest has a PBKDF2-hashed password (pitv_secrets.hash_password), an NFC
+auto-login token, and a player PIN (shown in the portal, works on the game
+keypad).
 """
 
-import hashlib
 import json
 import os
 import secrets
 import socket
 import sys
+import time
+
+import pitv_secrets
 
 PITV_DIR       = os.path.expanduser("~/.pitv")
 GUEST_FILE     = os.path.join(PITV_DIR, "guests.json")
 ADMIN_FILE     = os.path.join(PITV_DIR, "admin.json")
 PIN_FILE       = os.path.join(PITV_DIR, "pins.json")
 GUEST_SECRET   = os.path.join(PITV_DIR, "portal-secret")
-EMERGENCY_CODE = "159753"
+
+# A username goes into the signed session cookie as "user|expiry", so a "|" in
+# one would make the cookie ambiguous. Everything else is fine — the portal
+# HTML-escapes names now — so this stays narrow enough not to reject a real
+# name like "Anna's iPad".
+BAD_NAME_CHARS = set('|\r\n\t')
 
 
 def _load(path, default):
@@ -54,8 +62,12 @@ def load_guests():
     return d
 
 
+def valid_name(name):
+    return bool(name) and len(name) <= 40 and not (set(name) & BAD_NAME_CHARS)
+
+
 def new_pin(used):
-    used = set(used) | {EMERGENCY_CODE}
+    used = set(used) | {pitv_secrets.emergency_code()}
     while True:
         p = f"{secrets.randbelow(1000000):06d}"
         if p not in used:
@@ -83,13 +95,16 @@ def cmd_password_set(args):
         print("Usage: screen guest password set <username> <password>")
         sys.exit(1)
     user, password = args[1], args[2]
+    if not valid_name(user):
+        print("Username can't contain '|', a tab or a newline, and must be at "
+              "most 40 characters."); sys.exit(1)
+    if len(password) < 6:
+        print("Password must be at least 6 characters."); sys.exit(1)
     data = load_guests()
     pins = _load(PIN_FILE, {})
     g = data["guests"].get(user, {})
-    salt = g.get("salt") or secrets.token_hex(8)
-    g["salt"]   = salt
-    g["pwhash"] = hashlib.sha256((salt + password).encode()).hexdigest()
-    g["token"]  = g.get("token") or secrets.token_urlsafe(16)
+    g.update(pitv_secrets.hash_password(password))   # replaces salt + hash
+    g["token"]  = g.get("token") or secrets.token_urlsafe(32)
     data["guests"][user] = g
     if user not in pins:
         pins[user] = new_pin(pins.values())
@@ -131,7 +146,7 @@ def cmd_rotate():
     for user in data["guests"]:
         pins[user] = new_pin(pins.values())
     _save(PIN_FILE, pins)
-    data["meta"]["pin_rotated"] = int(__import__("time").time())
+    data["meta"]["pin_rotated"] = int(time.time())
     _save(GUEST_FILE, data)
     for user in data["guests"]:
         print(f"- {user}: {pins[user]}")
@@ -142,12 +157,13 @@ def cmd_admin_set(args):
     if len(args) < 2:
         print("Usage: screen admin password set <username> <password>"); sys.exit(1)
     user, password = args[0], args[1]
+    if not valid_name(user):
+        print("Username can't contain '|', a tab or a newline, and must be at "
+              "most 40 characters."); sys.exit(1)
+    if len(password) < 8:
+        print("Admin password must be at least 8 characters."); sys.exit(1)
     admins = _load(ADMIN_FILE, {})
-    salt = admins.get(user, {}).get("salt") or secrets.token_hex(8)
-    admins[user] = {
-        "salt": salt,
-        "pwhash": hashlib.sha256((salt + password).encode()).hexdigest(),
-    }
+    admins[user] = pitv_secrets.hash_password(password)
     _save(ADMIN_FILE, admins)
     print(f"Admin '{user}' set.  Portal: http://{local_ip()}/  (raspberrypi.local)")
 

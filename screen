@@ -52,6 +52,8 @@ System:
   screen unlock authorise <code>        clear a full lockdown
   screen joke on|off|status             joke mode: after a random 10-50 min
                                         the TV "dies" on its own, then again
+  screen emergency status               is the master code still the default?
+  screen emergency set <6 digits>       set the master (emergency) code
 
 Guest web portal (port 8080, only when Home 'Guest Mode' is on):
   screen guest password set <name> <pw> create/update a guest login
@@ -93,9 +95,13 @@ _send() {
         || { echo "Error: timeout writing to FIFO" >&2; exit 1; }
 }
 
+# Both senders quote the payload with printf %q before it reaches `bash -c`,
+# so a $(...) or backtick in an argument is written to the FIFO as text rather
+# than executed. Callers upper-case what they pass to _send; _send_raw is for
+# lines that must keep their case (e.g. "UNLOCK <code>").
 _send_raw() {
     _check_fifo
-    timeout 3 bash -c "echo \"$1\" > '$FIFO'" 2>/dev/null \
+    timeout 3 bash -c "echo $(printf '%q' "$1") > '$FIFO'" 2>/dev/null \
         || { echo "Error: timeout writing to FIFO" >&2; exit 1; }
 }
 
@@ -218,6 +224,11 @@ case "$CMD" in
             *)
                 echo "Usage: screen joke on|off|status" >&2; exit 1 ;;
         esac
+        ;;
+
+    emergency)
+        shift
+        exec python3 /opt/pitv/pin-admin.py emergency "$@"
         ;;
 
     unlock)

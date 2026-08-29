@@ -10,7 +10,9 @@ in `VERSION` (and `tv_menu.py`'s `VERSION`), shown by `screen version`.
 Security escalation: 3 wrong game PINs → lockout keypad; 3 wrong tries there →
 **full lockdown** (`hard_locked`): the TV is forced off every 7 s and the
 screen is blocked. Only `screen unlock authorise <emergency code>` clears it
-(kill switch off, TV on, input → PiTV).
+(kill switch off, TV on, input → PiTV). Both lock states are persisted to
+`~/.pitv/lock-state.json` and restored at startup, so power-cycling the Pi no
+longer clears a lockdown.
 
 ## Git settings
 
@@ -154,8 +156,11 @@ is ON. The plugin's Guest Mode switch sends `GUEST_ON`/`GUEST_OFF` over the 8129
 UDP channel; `tv_menu` writes `/tmp/pitv-guest-mode`, which the portal reads.
 Guests sign in with a password (`screen guest password set <user> <pw>`) or an
 NFC link `/nfc?t=<token>` (1-week HMAC-signed cookie that redirects to hide the
-URL), see their assigned player PIN (rotates weekly or via
-`screen pin guest rotate all`), and cannot use the kill switch or admin.
+URL), see their assigned player PIN (rotates weekly — checked on each page load,
+not just at startup — or via `screen pin guest rotate all`), and cannot use the
+kill switch or admin. Both portals throttle failed logins (and bad NFC tokens)
+per client IP with a doubling lockout, cap request bodies, send a CSP plus
+`nosniff`/`DENY`/`no-referrer`, and refuse a cross-origin POST.
 Actuation: TV/input via the 8129 UDP channel, menu nav by writing the FIFO.
 Data lives in `~/.pitv/guests.json` + `~/.pitv/pins.json` (device-only).
 
@@ -173,9 +178,22 @@ bypass code are **device-only**. Keep them out of git. If any leaks into the
 repo, rotate it. Config files that contain them (e.g. `~/.homebridge/config.json`)
 live on the Pi, not here.
 
+`pitv_secrets.py` is the one place that handles them:
+
+- **Emergency code** — lives in `~/.pitv/emergency-code` (0600), read fresh on
+  every check, set with `screen emergency set <6 digits>`. It used to be
+  hardcoded in `tv_menu.py`, `guest-portal.py` and `pin-admin.py`, so the
+  shipped value (`LEGACY_EMERGENCY_CODE`) is **public in git history** — it is
+  kept only to seed the file on upgrade. `screen emergency status` says whether
+  a Pi is still on it, and `tv_menu` logs a warning at boot while it is.
+- **Portal passwords** — PBKDF2-HMAC-SHA256, per-record salt and iteration
+  count (`hash_password` / `verify_password`). Records written by older
+  versions (one round of salted SHA-256) still verify and are upgraded in place
+  on the owner's next sign-in.
+- **Player PINs** and NFC tokens come from `secrets`, never `random`.
+
 ## Branch / deploy workflow
 
-Development branch: `claude/pitv-onboarding-gu3vbq`, pushed to the remote
-`claude` branch (the remote can't hold `claude/…` because a ref named
-`claude` already occupies that namespace). After pulling on the Pi:
-`git pull origin claude && ./deploy.sh`.
+Development branch: **`experimental`**, pushed to the remote branch of the same
+name and merged to `main` by PR. After pulling on the Pi:
+`git pull origin experimental && ./deploy.sh`.

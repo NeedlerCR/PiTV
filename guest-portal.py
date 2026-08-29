@@ -10,11 +10,17 @@ Runs in one of two modes from the same code:
   admin  (--admin, port 80 -> http://raspberrypi.local) — username + password
          login; the same controls PLUS a Guest Mode on/off toggle; never gated.
 
+Passwords are PBKDF2-HMAC-SHA256 (see pitv_secrets.py); records written by
+older versions were a single round of SHA-256 and are re-hashed in place the
+next time that person signs in. Login failures are counted per client IP and
+locked out with a doubling backoff.
+
 Data (all under ~/.pitv, device-only, never committed):
-  guests.json  {"meta":{...},"guests":{user:{salt,pwhash,token}}}
-  admin.json   {user:{salt,pwhash}}
+  guests.json  {"meta":{...},"guests":{user:{algo,salt,iters,pwhash,token}}}
+  admin.json   {user:{algo,salt,iters,pwhash}}
   pins.json    shared with pin-admin.py; guest player PINs live here by name
   portal-secret  HMAC key for signed session cookies
+  emergency-code the master code (pitv_secrets.py owns it)
 State:
   /tmp/pitv-guest-mode   "on"/"off" (Home switch, or the admin toggle)
 Actuation:
@@ -25,15 +31,19 @@ Actuation:
 import base64
 import hashlib
 import hmac
+import html
 import json
 import os
 import secrets
 import socket
 import sys
+import threading
 import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+import pitv_secrets
 
 ADMIN           = "--admin" in sys.argv[1:]
 PORT            = 80 if ADMIN else 8080
@@ -55,7 +65,16 @@ UDP_ADDR        = ("127.0.0.1", 8129)
 # Admin sessions effectively never expire; guest sessions last a week.
 SESSION_MAX_AGE = (3650 if ADMIN else 7) * 24 * 3600
 ROTATE_PERIOD   = 7 * 24 * 3600
-EMERGENCY_CODE  = "159753"
+
+# Login throttling. The guest portal takes a password with no username, so it
+# is the one credential worth guessing on this box; without a limiter a phone
+# on the Wi-Fi could try thousands a minute. Failures are counted per client IP
+# and the lockout doubles, to a ceiling.
+MAX_FAILS       = 5
+FAIL_WINDOW     = 15 * 60
+LOCK_BASE       = 30
+LOCK_CEILING    = 15 * 60
+MAX_BODY        = 8192        # a login form is a few hundred bytes
 
 NAV = {"up": "UP", "down": "DOWN", "left": "LEFT", "right": "RIGHT",
        "ok": "SELECT", "back": "BACK"}
@@ -123,14 +142,32 @@ def guest_pin(username):
 
 # ── PIN rotation (weekly, guest mode only) ───────────────────────────
 def _new_pin(used):
-    used = set(used) | {EMERGENCY_CODE}
+    used = set(used) | {pitv_secrets.emergency_code()}
     while True:
         p = f"{secrets.randbelow(1000000):06d}"
         if p not in used:
             return p
 
 
+_last_rotate_check = 0.0
+_rotate_lock       = threading.Lock()
+
+
 def maybe_rotate():
+    """Rotate every guest's player PIN once a week. Cheap to call often — it
+    only touches disk once a minute unless a rotation is actually due. The lock
+    stops two simultaneous requests from rotating twice and handing one guest a
+    PIN that changes again a moment later."""
+    global _last_rotate_check
+    now = time.time()
+    with _rotate_lock:
+        if now - _last_rotate_check < 60:
+            return
+        _last_rotate_check = now
+        _rotate_if_due()
+
+
+def _rotate_if_due():
     data = load_guests()
     last = data["meta"].get("pin_rotated", 0)
     if data["guests"] and time.time() - last > ROTATE_PERIOD:
@@ -143,26 +180,103 @@ def maybe_rotate():
 
 
 # ── auth ─────────────────────────────────────────────────────────────
-def _pw_ok(rec, password):
-    try:
-        calc = hashlib.sha256((rec["salt"] + password).encode()).hexdigest()
-    except Exception:
-        return False
-    return hmac.compare_digest(calc, rec.get("pwhash", ""))
+def _upgrade_guest(user, password):
+    """Re-hash a legacy guest record with PBKDF2 now that we hold the
+    plaintext. Keeps the salt-and-token structure; nobody has to re-register."""
+    data = load_guests()
+    rec  = data["guests"].get(user)
+    if not rec:
+        return
+    rec.update(pitv_secrets.hash_password(password))
+    data["guests"][user] = rec
+    _save(GUEST_FILE, data)
+
+
+def _upgrade_admin(user, password):
+    admins = _load(ADMIN_FILE, {})
+    rec = admins.get(user)
+    if not rec:
+        return
+    rec.update(pitv_secrets.hash_password(password))
+    admins[user] = rec
+    _save(ADMIN_FILE, admins)
 
 
 def check_password(password):
-    """Guest login: password only -> matching guest username, or None."""
+    """Guest login: password only -> matching guest username, or None.
+
+    Every stored guest is checked even after a match so the reply doesn't leak,
+    by how long it took, how far down the list the matching guest sits."""
+    if not password:
+        return None
+    match = None
     for user, g in load_guests()["guests"].items():
-        if _pw_ok(g, password):
-            return user
-    return None
+        ok, stale = pitv_secrets.verify_password(g, password)
+        if ok and match is None:
+            match = (user, stale)
+    if not match:
+        return None
+    user, stale = match
+    if stale:
+        _upgrade_guest(user, password)
+    return user
 
 
 def check_admin(username, password):
     """Admin login: username + password -> username, or None."""
+    if not username or not password:
+        return None
     rec = _load(ADMIN_FILE, {}).get(username)
-    return username if rec and _pw_ok(rec, password) else None
+    if not rec:
+        return None
+    ok, stale = pitv_secrets.verify_password(rec, password)
+    if not ok:
+        return None
+    if stale:
+        _upgrade_admin(username, password)
+    return username
+
+
+# ── login throttling ─────────────────────────────────────────────────
+_fail_state = {}                  # ip -> {"fails": n, "until": ts, "seen": ts}
+_fail_lock  = threading.Lock()
+
+
+def _throttle_until(ip):
+    """Seconds the caller must wait, or 0 if they may try now."""
+    now = time.time()
+    with _fail_lock:
+        st = _fail_state.get(ip)
+        if not st:
+            return 0
+        if now - st["seen"] > FAIL_WINDOW:
+            _fail_state.pop(ip, None)
+            return 0
+        return max(0, int(st["until"] - now))
+
+
+def _note_failure(ip):
+    now = time.time()
+    with _fail_lock:
+        st = _fail_state.get(ip)
+        if not st or now - st["seen"] > FAIL_WINDOW:
+            st = {"fails": 0, "until": 0.0, "seen": now}
+        st["fails"] += 1
+        st["seen"]   = now
+        if st["fails"] >= MAX_FAILS:
+            backoff = min(LOCK_BASE * 2 ** (st["fails"] - MAX_FAILS), LOCK_CEILING)
+            st["until"] = now + backoff
+        _fail_state[ip] = st
+        # Don't let a busy network grow this without bound.
+        if len(_fail_state) > 512:
+            for old, v in list(_fail_state.items()):
+                if now - v["seen"] > FAIL_WINDOW:
+                    _fail_state.pop(old, None)
+
+
+def _note_success(ip):
+    with _fail_lock:
+        _fail_state.pop(ip, None)
 
 
 def valid_users():
@@ -258,7 +372,7 @@ def page(body):
 
 
 def login_body(err=""):
-    e = f'<p style="color:#ff8a8a">{err}</p>' if err else ""
+    e = f'<p style="color:#ff8a8a">{html.escape(err)}</p>' if err else ""
     userfield = ('<input name=username placeholder="Username" autofocus>'
                  if ADMIN else "")
     title = "PiTV Admin" if ADMIN else "PiTV Guest"
@@ -277,12 +391,15 @@ def gate_body():
 
 
 def controls_body(username):
+    # Look the PIN up with the real name; escape only for display, so a name
+    # with an & or < in it still resolves AND can't inject markup.
+    pin  = html.escape(str(guest_pin(username)))
+    name = html.escape(username)
     if ADMIN:
         gm = guest_mode_on()
-        pin = guest_pin(username)
         pin_card = (f'<div class=card><p class=muted>Your game PIN</p>'
                     f'<div class=pin>{pin}</div></div>') if pin != "—" else ""
-        head = (f"<h1>PiTV Admin</h1><p class=muted>Signed in as {username}</p>"
+        head = (f"<h1>PiTV Admin</h1><p class=muted>Signed in as {name}</p>"
                 + pin_card +
                 f'<div class=card><p class=muted>Guest Mode is '
                 f'<b>{"ON" if gm else "OFF"}</b></p><div class=row>'
@@ -290,9 +407,9 @@ def controls_body(username):
                 f'<button class=off onclick="act(\'guest_off\')">Guest Mode Off</button>'
                 f'</div></div>')
     else:
-        head = (f"<h1>PiTV Guest</h1><p class=muted>Signed in as {username}</p>"
+        head = (f"<h1>PiTV Guest</h1><p class=muted>Signed in as {name}</p>"
                 f"<div class=card><p class=muted>Your game PIN</p>"
-                f'<div class=pin>{guest_pin(username)}</div></div>')
+                f'<div class=pin>{pin}</div></div>')
     return head + """
 <div class=card><div class=row>
   <button onclick="act('tv_on')">TV On</button>
@@ -316,11 +433,24 @@ body:'action='+a}).then(function(){if(a.indexOf('guest_')==0)location.reload();}
 class Handler(BaseHTTPRequestHandler):
     server_version = "PiTV"
 
+    def _security_headers(self):
+        # The pages use inline styles/handlers, so the CSP allows inline but
+        # nothing external and no framing.
+        self.send_header("Content-Security-Policy",
+                         "default-src 'self'; img-src 'self' data:; "
+                         "style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+                         "frame-ancestors 'none'; base-uri 'none'")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cache-Control", "no-store")
+
     def _html(self, body, code=200, cookie=None):
         data = page(body).encode()
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        self._security_headers()
         if cookie:
             self.send_header("Set-Cookie", cookie)
         self.end_headers()
@@ -329,9 +459,27 @@ class Handler(BaseHTTPRequestHandler):
     def _redirect(self, location, cookie=None):
         self.send_response(302)
         self.send_header("Location", location)
+        self._security_headers()
         if cookie:
             self.send_header("Set-Cookie", cookie)
         self.end_headers()
+
+    def _client_ip(self):
+        # Direct LAN connections only — no proxy, so no XFF to trust.
+        try:
+            return self.client_address[0]
+        except Exception:
+            return "?"
+
+    def _same_origin(self):
+        """Reject a cross-site POST. Browsers omit Origin on some same-origin
+        requests (older Safari), so an absent header is allowed — this is
+        defence in depth behind the SameSite=Lax cookie, not the only guard."""
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        host = (self.headers.get("Host") or "").strip()
+        return urlparse(origin).netloc == host
 
     def _session_user(self):
         c = SimpleCookie(self.headers.get("Cookie", ""))
@@ -345,18 +493,33 @@ class Handler(BaseHTTPRequestHandler):
                 f"HttpOnly; SameSite=Lax")
 
     def _body(self):
-        length = int(self.headers.get("Content-Length", 0) or 0)
-        raw = self.rfile.read(length).decode() if length else ""
+        """Parse a form body, refusing anything oversized so a bogus
+        Content-Length can't make us allocate arbitrary memory."""
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            return None
+        if length < 0 or length > MAX_BODY:
+            return None
+        raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
         return {k: v[0] for k, v in parse_qs(raw).items()}
 
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/nfc" and not ADMIN:
+            # An NFC tag is a bearer credential, so guessing it is throttled the
+            # same way a password is.
+            ip = self._client_ip()
+            if _throttle_until(ip):
+                self._redirect("/")
+                return
             qs = parse_qs(urlparse(self.path).query)
             user = user_for_token(qs.get("t", [""])[0])
             if user and guest_mode_on():
+                _note_success(ip)
                 self._redirect("/", self._cookie(sign_session(user), SESSION_MAX_AGE))
             else:
+                _note_failure(ip)
                 self._redirect("/")
             return
         if path == "/logout":
@@ -367,21 +530,38 @@ class Handler(BaseHTTPRequestHandler):
 
         if not ADMIN and not guest_mode_on():
             self._html(gate_body()); return
+        if not ADMIN:
+            # Weekly PIN rotation used to be checked only at startup, so on a Pi
+            # that never restarts it never actually happened. Check it here, at
+            # most once a minute, so the schedule is real.
+            maybe_rotate()
         user = self._session_user()
         self._html(controls_body(user) if user else login_body())
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if not self._same_origin():
+            self.send_response(403); self.end_headers(); return
         if not ADMIN and not guest_mode_on():
             self._html(gate_body()); return
 
         if path == "/login":
+            ip = self._client_ip()
+            wait = _throttle_until(ip)
+            if wait:
+                self._html(login_body(
+                    f"Too many attempts — try again in {wait} s."), code=429)
+                return
             b = self._body()
+            if b is None:
+                self.send_response(413); self.end_headers(); return
             user = (check_admin(b.get("username", ""), b.get("password", ""))
                     if ADMIN else check_password(b.get("password", "")))
             if user:
+                _note_success(ip)
                 self._redirect("/", self._cookie(sign_session(user), SESSION_MAX_AGE))
             else:
+                _note_failure(ip)
                 self._html(login_body("Wrong login." if ADMIN else "Wrong password."),
                            code=401)
             return
@@ -389,7 +569,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/action":
             if not self._session_user():
                 self.send_response(403); self.end_headers(); return
-            action = self._body().get("action", "")
+            b = self._body()
+            if b is None:
+                self.send_response(413); self.end_headers(); return
+            action = b.get("action", "")
             if action in NAV:
                 write_fifo(NAV[action])
             elif action in UDP:
