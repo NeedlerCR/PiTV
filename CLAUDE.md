@@ -172,28 +172,46 @@ reboot never comes back still pranking); the plugin polls it, and
 time, so refreshing `/opt/pitv` alone isn't enough).
 (`tv-state.sh` was the older homebridge-cmd4 approach and is superseded.)
 
-## Guest pairing (a code on the TV)
+## Guest sign-in: password, then the connection password
 
-How visitors get in without anyone digging out a password or a remote — and
-the answer to "someone VPNs in and drives our TV": **you have to be able to see
-the telly**.
+Two steps, the second of which is **proof that you can see the telly** — which
+is exactly what someone who has VPN'd onto the network cannot do.
 
-- `tv_menu` owns the code (it owns the screen): a 6-digit `secrets` code in
-  `~/.pitv/pairing.json` (0600) that rotates every 5 minutes, so a photo of the
-  TV goes stale. It sits dim in the corner of the menu (`draw_pair_hint`), and
-  the portal's **"Show the code on the TV"** button puts it up big for 30 s
-  (`draw_pair_overlay`). If the TV is on another input at that moment, PiTV
-  borrows it and switches back by itself — except during a game, when the
-  input is left alone.
-- The portal accepts the code in the same field as the guest password
-  (`check_pairing`) and grants a **6-hour** session (`PAIR_SESSION_AGE`), not
-  the week a password buys. Paired users are `pair:<id>`, are not in
-  `guests.json`, and are vouched for by the cookie signature alone — so
-  `screen guest kick all` still ends them, and the admin portal never accepts
-  one.
-- Wrong codes feed the same per-IP lockout as passwords, and `/pair/show` has
-  its own cooldown so nobody can sit there flashing the screen.
-- On by default. `screen pair status|show|on|off`.
+1. The guest enters their account password (`check_password`). That buys a
+   **half-session** only: `half:<user>` in the signed cookie, good for 10
+   minutes, granting no control of anything (`verify_half`).
+2. The page then offers **"Show me the connection password"**. Pressing it asks
+   `tv_menu` to put a 6-digit code on the TV and the button **morphs into the
+   box you type it into** (`connect_body`). `POST /connect` checks it
+   (`check_pairing`) and issues the real session.
+
+- The code lives in `~/.pitv/pairing.json` (0600), comes from `secrets`, and
+  rotates every 5 minutes so a photo of the TV goes stale. It is **never on
+  screen unless asked for** — there is no corner hint.
+- **Guest Mode is its only switch.** Off ⇒ no code is minted, none is accepted,
+  and `pair_clear()` wipes the live one.
+- `pair_show()` puts it up for 30 s (`draw_pair_overlay`). If the TV is on
+  another input, PiTV borrows it and switches back by itself — except during a
+  game, when the input is left alone. `/pair/show` needs a half-session, so
+  only someone who already knows a guest password can make the TV flash, and a
+  cooldown stops even them repeating it.
+- Wrong codes feed the same per-IP lockout as passwords.
+- CLI: `screen guest code`, `screen guest code show`.
+
+## Lock switch and live pages
+
+- **Lock** is the admin's temporary pause: `/tmp/pitv-guest-lock` (so a reboot
+  clears it), toggled from the admin portal or `screen guest lock on|off`.
+  Guests keep their session, every control greys out (`body.locked`), and
+  `/action` answers **423 Locked** — the server refuses, so a stale tab gets
+  nowhere. Admins are unaffected.
+- **Pages update themselves.** Every signed-in page polls `/state` every 3 s
+  (`POLL_SECONDS`) for `{guest_mode, locked, sky, pin}`. A 401 means "you are
+  no longer signed in" and the page goes back to the login screen — so
+  `screen guest kick all`, Guest Mode going off, or a lock lands within
+  seconds instead of whenever someone happens to reload. A changed PIN updates
+  in place; Sky mode appearing reloads the page. Tabs also re-sync on
+  `visibilitychange`, so a phone coming out of a pocket is current at once.
 
 ## Authenticated commands
 
@@ -228,11 +246,12 @@ Nothing drives the TV on trust any more:
 menu via an on-screen **D-pad** — but ONLY while the Home **Guest Mode** switch
 is ON. The plugin's Guest Mode switch sends `GUEST_ON`/`GUEST_OFF` over the 8129
 UDP channel; `tv_menu` writes `/tmp/pitv-guest-mode`, which the portal reads.
-Guests sign in with a password (`screen guest password set <user> <pw>`) or an
-NFC link `/nfc?t=<token>` (1-week HMAC-signed cookie that redirects to hide the
-URL), see their assigned player PIN (rotates weekly — checked on each page load,
-not just at startup — or via `screen pin guest rotate all`), and cannot use the
-kill switch or admin. Both portals throttle failed logins (and bad NFC tokens)
+Guests sign in with a password plus the connection password on the TV (see
+above), or with an NFC link `/nfc?t=<token>` (a tap is already proof of
+presence, so it signs straight in; 1-week HMAC-signed cookie that redirects to
+hide the URL). They see their assigned player PIN (rotates weekly — checked on
+each page load, not just at startup — or via `screen pin guest rotate all`),
+and cannot use the kill switch or admin. Both portals throttle failed logins (and bad NFC tokens)
 per client IP with a doubling lockout, cap request bodies, send a CSP plus
 `nosniff`/`DENY`/`no-referrer`, and refuse a cross-origin POST.
 Actuation: TV/input via the 8129 UDP channel, menu nav by writing the FIFO.

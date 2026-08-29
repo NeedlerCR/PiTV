@@ -7,6 +7,8 @@ Invoked by `screen guest ...` and `screen pin guest rotate all`.
   screen guest password set <username> <password>   create/update a guest
   screen guest list                                 list guests + NFC links
   screen guest remove <username>                    delete a guest
+  screen guest code [show]                          the connection password
+  screen guest lock on|off|status                   pause the guests' buttons
   screen pin guest rotate all                       fresh PINs for all guests
 
 Data (device-only, never committed): ~/.pitv/guests.json, ~/.pitv/pins.json
@@ -29,6 +31,9 @@ GUEST_FILE     = os.path.join(PITV_DIR, "guests.json")
 ADMIN_FILE     = os.path.join(PITV_DIR, "admin.json")
 PIN_FILE       = os.path.join(PITV_DIR, "pins.json")
 GUEST_SECRET   = os.path.join(PITV_DIR, "portal-secret")
+PAIR_FILE      = os.path.join(PITV_DIR, "pairing.json")
+GUEST_MODE     = "/tmp/pitv-guest-mode"
+GUEST_LOCK     = "/tmp/pitv-guest-lock"
 
 # A username goes into the signed session cookie as "user|expiry", so a "|" in
 # one would make the cookie ambiguous. Everything else is fine — the portal
@@ -187,6 +192,61 @@ def cmd_admin_remove(args):
     print(f"Removed admin '{args[0]}'.")
 
 
+def _guest_mode_on():
+    try:
+        with open(GUEST_MODE) as f:
+            return f.read().strip().lower() == "on"
+    except OSError:
+        return False
+
+
+def cmd_code():
+    """What the guest is asked for after their password: a code shown on the
+    TV. Guest Mode is its switch — there is no separate one."""
+    if not _guest_mode_on():
+        print("Guest Mode is OFF, so there is no connection password.")
+        print("Guests can't sign in at all until it is on (Home app, the admin")
+        print("portal, or: screen guest lock is a softer pause).")
+        return
+    d = _load(PAIR_FILE, {})
+    left = int(d.get("expires", 0) - time.time())
+    print("Guest Mode is ON — guests sign in with their password, then the")
+    print("connection password shown on the TV.")
+    if d.get("code") and left > 0:
+        print(f"  Code now  : {d['code']}   (changes in {left}s)")
+    else:
+        print("  Code now  : none live — one is minted when a guest asks")
+    if d.get("show_until", 0) > time.time():
+        print("  On the TV : yes, right now")
+    print("  Put it on the TV with:  screen guest code show")
+
+
+def cmd_lock(args):
+    """The admin Lock switch, from the CLI. Guests stay signed in; every button
+    greys out until it is lifted."""
+    sub = (args[0] if args else "status").lower()
+    if sub in ("on", "off"):
+        try:
+            with open(GUEST_LOCK, "w") as f:
+                f.write("on" if sub == "on" else "off")
+        except OSError as e:
+            print(f"Could not write {GUEST_LOCK}: {e}"); sys.exit(1)
+        print("Guest controls LOCKED — their buttons are greyed out."
+              if sub == "on" else
+              "Guest controls unlocked.")
+        print("Open guest pages update within a few seconds.")
+        return
+    if sub == "status":
+        try:
+            with open(GUEST_LOCK) as f:
+                on = f.read().strip().lower() == "on"
+        except OSError:
+            on = False
+        print("Guest controls: " + ("LOCKED" if on else "unlocked"))
+        return
+    print("Usage: screen guest lock <on|off|status>"); sys.exit(1)
+
+
 def cmd_kick():
     """Sign every guest out (even offline ones) by rotating the guest session
     key — all existing guest cookies become invalid. Admins are unaffected."""
@@ -213,6 +273,10 @@ def main():
         cmd_remove(args[1:])
     elif cmd == "rotate":
         cmd_rotate()
+    elif cmd == "code":
+        cmd_code()
+    elif cmd == "lock":
+        cmd_lock(args[1:])
     elif cmd == "admin-set":
         cmd_admin_set(args[1:])
     elif cmd == "admin-list":
@@ -220,7 +284,8 @@ def main():
     elif cmd == "admin-remove":
         cmd_admin_remove(args[1:])
     else:
-        print("Usage: screen guest <password set|list|remove> ...")
+        print("Usage: screen guest <password set|list|remove|kick all|"
+              "code|lock> ...")
         sys.exit(1)
 
 

@@ -68,11 +68,6 @@ Sky Q (OFF by default — nothing is sent to the Sky box until you turn it on):
                                         blue 0-9
   screen sky power on|off               Sky Q's own standby
 
-Guest pairing (how visitors sign in: a code shown on the TV):
-  screen pair status                    show the current code + setting
-  screen pair show                      put the code up on the TV for 30s
-  screen pair on | off                  enable/disable pairing (on by default)
-
 Access control:
   screen control status                 signed-command channel: key, who can
                                         read it, whether Homebridge can
@@ -88,6 +83,9 @@ Guest web portal (port 8080, only when Home 'Guest Mode' is on):
   screen guest list                     list guests + their NFC links
   screen guest remove <name>            delete a guest
   screen guest kick all                 sign out ALL guests immediately
+  screen guest code                     show the connection password + status
+  screen guest code show                put it on the TV for 30 seconds
+  screen guest lock on|off|status       pause/resume the guests' buttons
   screen pin guest rotate all           fresh player PINs for all guests
 
 Admin web portal (http://raspberrypi.local, username + password):
@@ -206,8 +204,23 @@ case "$CMD" in
         ;;
 
     guest)
-        shift
-        exec python3 /opt/pitv/guest-admin.py "$@"
+        case "${2:-}" in
+            code)
+                if [[ "${3:-}" == "show" ]]; then
+                    _send_raw "PAIR_SHOW"
+                    echo "The connection password is on the TV for 30 seconds."
+                else
+                    exec python3 /opt/pitv/guest-admin.py code
+                fi
+                ;;
+            lock)
+                exec python3 /opt/pitv/guest-admin.py lock "${3:-status}"
+                ;;
+            *)
+                shift
+                exec python3 /opt/pitv/guest-admin.py "$@"
+                ;;
+        esac
         ;;
 
     admin)
@@ -288,16 +301,6 @@ case "$CMD" in
                 echo "Sky: ${2^^}   (nothing happens while 'screen sky status'"
                 echo "says OFF, or if the button name isn't one Sky knows)"
                 ;;
-        esac
-        ;;
-
-    pair)
-        case "${2:-status}" in
-            show)   _send_raw "PAIR_SHOW"; echo "Code is on the TV for 30 seconds." ;;
-            on)     _send_raw "PAIR_ON";   echo "Guest pairing ON." ;;
-            off)    _send_raw "PAIR_OFF";  echo "Guest pairing OFF." ;;
-            status) exec python3 /opt/pitv/pitv-config.py pair ;;
-            *)      echo "Usage: screen pair <status|show|on|off>" >&2; exit 1 ;;
         esac
         ;;
 

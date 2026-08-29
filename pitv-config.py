@@ -3,7 +3,6 @@
 /opt/pitv/pitv-config.py — local settings the `screen` CLI edits directly.
 
   screen sky status                  Sky Q control: on/off, device, routing
-  screen pair status                 the guest pairing code shown on the TV
   screen control status              the signed-command channel
   screen control key show|rotate     the shared control key
   screen network status              who may reach the web portals
@@ -25,7 +24,6 @@ import pitv_secrets
 
 PITV_DIR     = os.path.expanduser("~/.pitv")
 SKY_FILE     = os.path.join(PITV_DIR, "sky.json")
-PAIR_FILE    = os.path.join(PITV_DIR, "pairing.json")
 NETWORK_FILE = os.path.join(PITV_DIR, "network.json")
 TV_INPUT     = "/tmp/pitv-tv-input"
 SKY_PHYS     = "10:00"
@@ -64,26 +62,6 @@ def cmd_sky(args):
     seen  = phys or "unknown"
     print(f"  TV input now      : {seen}")
     print(f"  Nav keys go to    : {where}")
-
-
-# ── pairing ──────────────────────────────────────────────────────────
-def cmd_pair(args):
-    import time
-    d = _load(PAIR_FILE, {})
-    if not d.get("enabled", True):
-        print("Guest pairing: OFF")
-        print("Turn it back on with:  screen pair on")
-        return
-    print("Guest pairing: ON — guests sign in with the code on the TV")
-    left = int(d.get("expires", 0) - time.time())
-    if d.get("code") and left > 0:
-        print(f"  Code now      : {d['code']}  (changes in {left}s)")
-    else:
-        print("  Code now      : none yet — it appears when the menu next draws")
-    if d.get("show_until", 0) > time.time():
-        print("  On screen     : yes, right now")
-    print("  Session length: 6 hours, then the guest pairs again")
-    print("  Put it on the TV with:  screen pair show")
 
 
 # ── control key ──────────────────────────────────────────────────────
@@ -242,8 +220,6 @@ def main():
     cmd = args[0] if args else ""
     if cmd == "sky":
         cmd_sky(args[1:])
-    elif cmd == "pair":
-        cmd_pair(args[1:])
     elif cmd == "control":
         cmd_control(args[1:])
     elif cmd == "network":

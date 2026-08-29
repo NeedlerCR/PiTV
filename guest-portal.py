@@ -72,13 +72,20 @@ FIFO            = "/tmp/tv_menu.fifo"
 UDP_ADDR        = ("127.0.0.1", 8129)
 # Admin sessions effectively never expire; guest sessions last a week.
 SESSION_MAX_AGE = (3650 if ADMIN else 7) * 24 * 3600
-# A guest who paired off the TV screen instead of being given a password gets a
-# few hours, not a week — long enough for an evening, short enough that a
-# visitor doesn't keep access after they have gone home.
-PAIR_SESSION_AGE = 6 * 3600
-PAIR_PREFIX      = "pair:"
+# Signing in as a guest has two steps: the account password, then the
+# "connection password" shown on the TV. Between the two the guest holds a
+# half-session — it proves they got the password right and lets them ask for
+# the code, and it grants no control of anything.
+HALF_PREFIX     = "half:"
+HALF_AGE        = 600
 # Don't let anyone flash the code onto the TV over and over.
-PAIR_SHOW_COOL   = 20
+PAIR_SHOW_COOL  = 20
+# The admin "Lock" switch: guests keep their session but every control is
+# greyed out until it is lifted. In /tmp so a reboot always clears it.
+GUEST_LOCK_FILE = "/tmp/pitv-guest-lock"
+# How often a signed-in page re-checks state, so a kick, a lock or Guest Mode
+# going off lands in seconds instead of whenever someone happens to reload.
+POLL_SECONDS    = 3
 ROTATE_PERIOD   = 7 * 24 * 3600
 
 # Login throttling. The guest portal takes a password with no username, so it
@@ -337,6 +344,23 @@ def sign_session(username, max_age=None):
     return base64.urlsafe_b64encode(payload).decode() + "." + sig
 
 
+def verify_half(cookie_val):
+    """The user who has passed step one and is waiting to type the code."""
+    try:
+        b64, sig = cookie_val.split(".", 1)
+        payload = base64.urlsafe_b64decode(b64.encode())
+        good = hmac.new(get_secret(), payload, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(good, sig):
+            return None
+        user, exp = payload.decode().split("|")
+        if int(exp) < time.time() or not user.startswith(HALF_PREFIX):
+            return None
+        user = user[len(HALF_PREFIX):]
+        return user if user in valid_users() else None
+    except Exception:
+        return None
+
+
 def verify_session(cookie_val):
     try:
         b64, sig = cookie_val.split(".", 1)
@@ -347,11 +371,8 @@ def verify_session(cookie_val):
         user, exp = payload.decode().split("|")
         if int(exp) < time.time():
             return None
-        if user.startswith(PAIR_PREFIX):
-            # Paired guests aren't in guests.json — the signature and the
-            # expiry are what vouch for them. `screen guest kick all` still
-            # ends these, since it rotates the key this cookie is signed with.
-            return None if ADMIN else user
+        if user.startswith(HALF_PREFIX):
+            return None            # half-way through signing in: no control
         return user if user in valid_users() else None
     except Exception:
         return None
@@ -371,29 +392,38 @@ def send_udp(msg):
         pass
 
 
-# ── pairing (a code shown on the TV) ─────────────────────────────────
-def pair_enabled():
-    d = _load(PAIR_FILE, {})
-    return bool(d) and d.get("enabled", True)
-
-
+# ── the connection password (a code shown on the TV) ─────────────────
 def check_pairing(code):
-    """A 6-digit code that matches the one currently on the TV screen buys a
-    short session. Whoever typed it could see the telly, which is the whole
-    point — someone who has merely reached the network cannot."""
+    """True if this matches the code currently live on the TV. Whoever typed it
+    could see the telly, which is the whole point — someone who has merely
+    reached the network cannot. Guest Mode is the switch: tv_menu stops issuing
+    a code when it is off."""
     if not code or not code.isdigit() or len(code) != 6:
-        return None
+        return False
+    if not guest_mode_on():
+        return False
     d = _load(PAIR_FILE, {})
-    if not d.get("enabled", True):
-        return None
     live = str(d.get("code", ""))
     if not live or d.get("expires", 0) < time.time():
-        return None
-    if not hmac.compare_digest(code, live):
-        return None
-    # A name that is obviously a paired guest in the log, and unique per device
-    # so two visitors don't share one identity.
-    return PAIR_PREFIX + secrets.token_hex(3)
+        return False
+    return hmac.compare_digest(code, live)
+
+
+def guest_locked():
+    """The admin Lock switch — guests stay signed in but can't press anything."""
+    try:
+        with open(GUEST_LOCK_FILE) as f:
+            return f.read().strip().lower() == "on"
+    except OSError:
+        return False
+
+
+def set_guest_lock(on):
+    try:
+        with open(GUEST_LOCK_FILE, "w") as f:
+            f.write("on" if on else "off")
+    except OSError:
+        pass
 
 
 def sky_on():
@@ -477,6 +507,9 @@ background:#0b0f1a;color:#fff;margin:6px 0}}
 .pad button{{aspect-ratio:1;font-size:20px}}.pad .sp{{visibility:hidden}}
 .pin{{font-size:30px;letter-spacing:4px;font-weight:700;color:#7fd1ff}}
 .on{{background:#1f7a3f}}.off{{background:#7a2a2a}}
+.lockbar{{position:sticky;bottom:0;background:#7a2a2a;color:#fff;padding:10px;
+border-radius:10px;margin:10px 0;font-size:15px}}
+body.locked .card button{{opacity:.35;pointer-events:none;filter:grayscale(1)}}
 a{{color:#7fd1ff}}
 </style></head><body><div class=wrap>{body}</div></body></html>"""
 
@@ -485,34 +518,54 @@ def page(body):
     return PAGE.format(body=body, who="Admin" if ADMIN else "Guest")
 
 
-def login_body(err="", note=""):
+def login_body(err=""):
     e = f'<p style="color:#ff8a8a">{html.escape(err)}</p>' if err else ""
-    n = f'<p style="color:#8fe3a5">{html.escape(note)}</p>' if note else ""
     userfield = ('<input name=username placeholder="Username" autofocus>'
                  if ADMIN else "")
     title = "PiTV Admin" if ADMIN else "PiTV Guest"
-    paired = (not ADMIN) and pair_enabled()
-    if ADMIN:
-        hint  = "Sign in."
-        field = "Password"
-    elif paired:
-        hint  = "Type the code shown on the TV, or your guest password."
-        field = "Code on the TV, or password"
-    else:
-        hint  = "Enter the guest password."
-        field = "Password"
-    # Shown signed out on purpose: reading the code still needs line of sight
-    # to the telly, and that is the credential.
-    button = ('<form method=post action="/pair/show">'
-              '<button type=submit>Show the code on the TV</button></form>'
-              if paired else "")
+    hint = "Sign in." if ADMIN else "Enter your guest password."
     return (f"<h1>{title}</h1><p class=muted>{hint}</p>"
-            f'<div class=card><form method=post action="/login">{e}{n}{userfield}'
-            f'<input type=password name=password placeholder="{field}"'
-            f'{"" if ADMIN else " autofocus"} inputmode='
-            f'{"numeric" if paired else "text"}>'
-            f'<button type=submit>Sign in</button></form>'
-            f'{button}</div>')
+            f'<div class=card><form method=post action="/login">{e}{userfield}'
+            f'<input type=password name=password placeholder="Password"'
+            f'{"" if ADMIN else " autofocus"}>'
+            f'<button type=submit>Sign in</button></form></div>')
+
+
+def connect_body(username, err=""):
+    """Step two: the password was right, now prove you can see the TV. The
+    button turns into the box you type the answer into, so there is only ever
+    one thing on screen to do next."""
+    e = f'<p style="color:#ff8a8a">{html.escape(err)}</p>' if err else ""
+    return (f"<h1>PiTV Guest</h1>"
+            f"<p class=muted>Hello {html.escape(username)} — one more step.</p>"
+            f"<div class=card>{e}"
+            f'<p class=muted>The connection password appears on the TV.</p>'
+            f'<button id=showbtn onclick="showcode()">'
+            f'Show me the connection password</button>'
+            f'<form id=codeform method=post action="/connect" '
+            f'style="display:none">'
+            f'<input name=code inputmode=numeric autocomplete=off maxlength=6 '
+            f'placeholder="Connection password">'
+            f'<button type=submit>Connect</button></form>'
+            f'<noscript><style>#codeform{{display:block!important}}'
+            f'#showbtn{{display:none}}</style>'
+            f'<p class=muted>Ask the host to run: screen guest code show</p>'
+            f'</noscript></div>'
+            f'<p class=muted><a href="/logout">Start again</a></p>'
+            f"""
+<script>
+function showcode(){{
+  var b=document.getElementById('showbtn');
+  b.disabled=true; b.textContent='Look at the TV…';
+  fetch('/pair/show',{{method:'POST',headers:{{'Content-Type':
+    'application/x-www-form-urlencoded'}},body:''}}).then(function(){{
+    b.style.display='none';
+    var f=document.getElementById('codeform');
+    f.style.display='block'; f.querySelector('input').focus();
+  }}).catch(function(){{ b.disabled=false;
+    b.textContent='Show me the connection password'; }});
+}}
+</script>""")
 
 
 def gate_body():
@@ -525,22 +578,26 @@ def controls_body(username):
     # Look the PIN up with the real name; escape only for display, so a name
     # with an & or < in it still resolves AND can't inject markup.
     pin  = html.escape(str(guest_pin(username)))
-    name = ("a guest (paired from the TV)" if username.startswith(PAIR_PREFIX)
-            else html.escape(username))
+    name = html.escape(username)
+    pin_card = (f'<div class=card><p class=muted>Your game PIN</p>'
+                f'<div class="pin" id=pin>{pin}</div></div>') if pin != "—" else ""
     if ADMIN:
         gm = guest_mode_on()
-        pin_card = (f'<div class=card><p class=muted>Your game PIN</p>'
-                    f'<div class=pin>{pin}</div></div>') if pin != "—" else ""
+        lk = guest_locked()
         head = (f"<h1>PiTV Admin</h1><p class=muted>Signed in as {name}</p>"
                 + pin_card +
                 f'<div class=card><p class=muted>Guest Mode is '
-                f'<b>{"ON" if gm else "OFF"}</b></p><div class=row>'
+                f'<b id=gmstate>{"ON" if gm else "OFF"}</b></p><div class=row>'
                 f'<button class=on onclick="act(\'guest_on\')">Guest Mode On</button>'
                 f'<button class=off onclick="act(\'guest_off\')">Guest Mode Off</button>'
+                f'</div>'
+                f'<p class=muted style="margin-top:14px">Guest controls are '
+                f'<b id=lkstate>{"LOCKED" if lk else "unlocked"}</b></p>'
+                f'<div class=row>'
+                f'<button class=off onclick="act(\'guest_lock\')">Lock</button>'
+                f'<button class=on onclick="act(\'guest_unlock\')">Unlock</button>'
                 f'</div></div>')
     else:
-        pin_card = (f"<div class=card><p class=muted>Your game PIN</p>"
-                    f'<div class=pin>{pin}</div></div>') if pin != "—" else ""
         head = (f"<h1>PiTV Guest</h1><p class=muted>Signed in as {name}</p>"
                 + pin_card)
     sky = ""
@@ -554,7 +611,7 @@ def controls_body(username):
                '<button onclick="act(\'sky_power_on\')">Sky On</button>'
                '<button onclick="act(\'sky_power_off\')">Sky Standby</button>'
                '</div></div>')
-    return head + sky + """
+    return (head + sky + """
 <div class=card><div class=row>
   <button onclick="act('tv_on')">TV On</button>
   <button onclick="act('tv_off')">TV Off</button></div>
@@ -568,9 +625,46 @@ def controls_body(username):
   <button onclick="act('back')">Back</button><button onclick="act('down')">&#9660;</button>
   <span class="sp"></span></div></div>
 <p class=muted><a href="/logout">Sign out</a></p>
-<script>function act(a){fetch('/action',{method:'POST',
-headers:{'Content-Type':'application/x-www-form-urlencoded'},
-body:'action='+a}).then(function(){if(a.indexOf('guest_')==0)location.reload();});}</script>"""
+<div id=lockbar class=lockbar hidden>The host has paused the controls.</div>
+<script>
+var ADMIN = %ADMIN%, POLL = %POLL%;
+function act(a){
+  if(document.body.classList.contains('locked') && !ADMIN) return;
+  fetch('/action',{method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'action='+a}).then(function(r){ if(r.status==423) sync(); });
+}
+// Poll so a kick, a lock, Guest Mode going off or a rotated PIN lands within
+// seconds — nobody has to know to pull-to-refresh.
+var state = null;
+function apply(s){
+  if(state && (s.sky !== state.sky || s.guest_mode !== state.guest_mode)){
+    location.reload(); return;              // the page shape changed
+  }
+  state = s;
+  document.body.classList.toggle('locked', !!s.locked && !ADMIN);
+  var bar = document.getElementById('lockbar');
+  if(bar) bar.hidden = !(s.locked && !ADMIN);
+  var pin = document.getElementById('pin');
+  if(pin && s.pin && pin.textContent !== s.pin) pin.textContent = s.pin;
+  var gm = document.getElementById('gmstate');
+  if(gm) gm.textContent = s.guest_mode ? 'ON' : 'OFF';
+  var lk = document.getElementById('lkstate');
+  if(lk) lk.textContent = s.locked ? 'LOCKED' : 'unlocked';
+}
+function sync(){
+  fetch('/state',{headers:{'Accept':'application/json'}}).then(function(r){
+    if(r.status === 401){ location.href = '/'; return null; }   // kicked
+    return r.json();
+  }).then(function(s){ if(s) apply(s); }).catch(function(){});
+}
+sync(); setInterval(sync, POLL*1000);
+document.addEventListener('visibilitychange', function(){
+  if(!document.hidden) sync();              // straight back on re-open
+});
+</script>"""
+            .replace("%ADMIN%", "true" if ADMIN else "false")
+            .replace("%POLL%", str(POLL_SECONDS)))
 
 
 # ── HTTP handler ─────────────────────────────────────────────────────
@@ -631,6 +725,22 @@ class Handler(BaseHTTPRequestHandler):
             return verify_session(c[COOKIE_NAME].value)
         return None
 
+    def _pending_user(self):
+        """Someone who has passed step one and owes us the code off the TV."""
+        c = SimpleCookie(self.headers.get("Cookie", ""))
+        if COOKIE_NAME in c:
+            return verify_half(c[COOKIE_NAME].value)
+        return None
+
+    def _json(self, obj, code=200):
+        data = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self._security_headers()
+        self.end_headers()
+        self.wfile.write(data)
+
     @staticmethod
     def _cookie(value, age):
         return (f"{COOKIE_NAME}={value}; Path=/; Max-Age={age}; "
@@ -669,6 +779,21 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/logout":
             self._redirect("/", f"{COOKIE_NAME}=; Path=/; Max-Age=0")
             return
+        if path == "/state":
+            # What every open page polls. 401 is the signal to go back to the
+            # login screen, which is how a kick lands in seconds.
+            user = self._session_user()
+            if not user or (not ADMIN and not guest_mode_on()):
+                self._json({"ok": False}, code=401)
+                return
+            self._json({
+                "ok":         True,
+                "guest_mode": guest_mode_on(),
+                "locked":     guest_locked(),
+                "sky":        sky_on(),
+                "pin":        str(guest_pin(user)),
+            })
+            return
         if path != "/":
             self.send_response(404); self.end_headers(); return
 
@@ -680,7 +805,12 @@ class Handler(BaseHTTPRequestHandler):
             # most once a minute, so the schedule is real.
             maybe_rotate()
         user = self._session_user()
-        self._html(controls_body(user) if user else login_body())
+        if user:
+            self._html(controls_body(user))
+        elif not ADMIN and self._pending_user():
+            self._html(connect_body(self._pending_user()))
+        else:
+            self._html(login_body())
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -700,47 +830,73 @@ class Handler(BaseHTTPRequestHandler):
             if b is None:
                 self.send_response(413); self.end_headers(); return
             secret = b.get("password", "")
-            age    = SESSION_MAX_AGE
             if ADMIN:
                 user = check_admin(b.get("username", ""), secret)
-            else:
-                # A pairing code first (it's the common case for a visitor),
-                # then the per-guest password.
-                user = check_pairing(secret)
                 if user:
-                    age = PAIR_SESSION_AGE
-                    print(f"paired {user} from {ip}", flush=True)
-                else:
-                    user = check_password(secret)
-            if user:
+                    _note_success(ip)
+                    self._redirect("/", self._cookie(
+                        sign_session(user), SESSION_MAX_AGE))
+                    return
+            else:
+                user = check_password(secret)
+                if user:
+                    # Step one done. The half-session controls nothing; it only
+                    # lets them ask the TV for the connection password.
+                    _note_success(ip)
+                    self._html(connect_body(user), cookie=self._cookie(
+                        sign_session(HALF_PREFIX + user, HALF_AGE), HALF_AGE))
+                    return
+            _note_failure(ip)
+            self._html(login_body("Wrong login." if ADMIN
+                                  else "That password wasn't right."), code=401)
+            return
+
+        if path == "/connect" and not ADMIN:
+            # Step two: the connection password from the TV screen.
+            pending = self._pending_user()
+            if not pending:
+                self._html(login_body("Please sign in again."), code=401)
+                return
+            ip   = self._client_ip()
+            wait = _throttle_until(ip)
+            if wait:
+                self._html(connect_body(pending,
+                    f"Too many tries — wait {wait} s."), code=429)
+                return
+            b = self._body()
+            if b is None:
+                self.send_response(413); self.end_headers(); return
+            if check_pairing(b.get("code", "")):
                 _note_success(ip)
-                self._redirect("/", self._cookie(sign_session(user, age), age))
+                print(f"connected {pending} from {ip}", flush=True)
+                self._redirect("/", self._cookie(
+                    sign_session(pending), SESSION_MAX_AGE))
             else:
                 _note_failure(ip)
-                self._html(login_body(
-                    "Wrong login." if ADMIN
-                    else "That code or password wasn't right."), code=401)
+                self._html(connect_body(pending,
+                    "That wasn't the connection password on the TV."), code=401)
             return
 
         if path == "/pair/show" and not ADMIN:
-            # Signed out on purpose — but rate limited, so nobody on the
-            # network can sit there flashing the code onto the screen.
-            if not pair_enabled():
-                self._html(login_body("Pairing is switched off."), code=403)
-                return
+            # Only for someone who has already given the right guest password,
+            # so nobody on the network can sit there flashing the TV.
+            if not self._pending_user():
+                self.send_response(403); self.end_headers(); return
             global _last_pair_show
             now = time.time()
-            if now - _last_pair_show < PAIR_SHOW_COOL:
-                self._html(login_body(note="It's on the TV now — look up."))
-                return
-            _last_pair_show = now
-            write_fifo("PAIR_SHOW")
-            self._html(login_body(note="Look at the TV, then type the code."))
+            if now - _last_pair_show >= PAIR_SHOW_COOL:
+                _last_pair_show = now
+                write_fifo("PAIR_SHOW")
+            self.send_response(204); self.end_headers()
             return
 
         if path == "/action":
             if not self._session_user():
                 self.send_response(403); self.end_headers(); return
+            if not ADMIN and guest_locked():
+                # 423 Locked — the page greys itself out, but the server is
+                # what actually refuses, so a stale tab can't get through.
+                self.send_response(423); self.end_headers(); return
             b = self._body()
             if b is None:
                 self.send_response(413); self.end_headers(); return
@@ -760,6 +916,8 @@ class Handler(BaseHTTPRequestHandler):
                 set_guest_mode(True)
             elif ADMIN and action == "guest_off":
                 set_guest_mode(False)
+            elif ADMIN and action in ("guest_lock", "guest_unlock"):
+                set_guest_lock(action == "guest_lock")
             self.send_response(204); self.end_headers()
             return
 

@@ -25,7 +25,7 @@ except ImportError:
     EVDEV_OK = False
 
 # ChronosVer: vYYYY.MAJOR.MINOR.BUG
-VERSION = "v2026.3.1.0"
+VERSION = "v2026.3.2.0"
 
 # ─────────────────────────────────────────────────────────────────────
 # LOG SYSTEM
@@ -549,9 +549,6 @@ def listen_fifo():
                     if cmd == "PAIR_SHOW":
                         pair_show()
                         continue
-                    if cmd in ("PAIR_ON", "PAIR_OFF"):
-                        set_pair_mode(cmd == "PAIR_ON")
-                        continue
 
                     # Sky Q. SKY_ON/SKY_OFF flip the master switch (off by
                     # default); "SKY <TOKEN>" is one button press, and does
@@ -855,15 +852,18 @@ def route_remote_key(tok: str) -> None:
 # GUEST PAIRING CODE  (proof of presence)
 # ─────────────────────────────────────────────────────────────────────
 #
-# A guest signs in to the web portal with a 6-digit code shown ON THE TV. You
-# can only read it if you can see the screen — which is exactly the
-# qualification we want, and precisely what someone who has VPN'd onto the
-# network cannot do. The code rotates every few minutes, so a photo of the TV
-# goes stale, and the session it grants lasts hours rather than a week.
+# The second half of a guest sign-in. After their account password the portal
+# asks for a "connection password" — a 6-digit code shown ON THE TV — so you
+# have to be able to see the screen to finish signing in. That is exactly what
+# someone who has merely VPN'd onto the network cannot do. It rotates every few
+# minutes, so a photo of the telly goes stale.
 #
-# tv_menu owns the code because it owns the screen; guest-portal.py reads the
-# same file to check it.
+# It is never on screen unless asked for, and it only works while Guest Mode is
+# on: switch Guest Mode off and the code stops being shown and stops being
+# accepted. tv_menu owns it because it owns the screen; guest-portal.py reads
+# the same file to check it.
 PAIR_FILE       = os.path.expanduser("~/.pitv/pairing.json")
+GUEST_MODE_FILE = "/tmp/pitv-guest-mode"
 PAIR_ROTATE     = 300      # a code is good for 5 minutes
 PAIR_SHOW_SECS  = 30       # how long "show it on the TV" stays up
 PAIR_SHOW_COOL  = 20       # ignore repeat requests inside this
@@ -905,26 +905,30 @@ def _pair_save(d: dict) -> None:
 
 
 def pair_enabled() -> bool:
-    """On unless someone turned it off — it is how guests get in."""
-    return _pair_load().get("enabled", True)
+    """Tied to Guest Mode — there is no separate switch. Guest Mode off means
+    the code is neither shown nor accepted."""
+    try:
+        with open(GUEST_MODE_FILE) as f:
+            return f.read().strip().lower() == "on"
+    except OSError:
+        return False
 
 
-def set_pair_mode(on: bool) -> None:
+def pair_clear() -> None:
+    """Drop the live code and take it off screen (Guest Mode going off)."""
     d = _pair_load()
-    d["enabled"] = bool(on)
-    if not on:
-        d.pop("code", None)             # don't leave a live code lying around
+    if d.get("code") or d.get("show_until"):
+        d.pop("code", None)
         d["show_until"] = 0
-    _pair_save(d)
-    log(f"Guest pairing {'ON' if on else 'OFF'}")
+        _pair_save(d)
 
 
 def pair_code() -> str:
     """The current code, rotating it when it expires. `secrets`, not `random`:
     it is a credential, however short-lived."""
-    d = _pair_load()
-    if not d.get("enabled", True):
+    if not pair_enabled():
         return ""
+    d = _pair_load()
     now = time.time()
     if not d.get("code") or d.get("expires", 0) < now:
         d["code"]    = f"{secrets.randbelow(1000000):06d}"
@@ -939,13 +943,13 @@ def pair_showing() -> bool:
 
 def pair_show():
     """Put the code up big for half a minute, as the portal's 'show me the
-    code' button asks. If the TV is on another input (watching Sky), flip to
-    the Pi for those seconds and then put it back — the guest presses the
-    button, looks up, and Sky returns on its own."""
+    connection password' button asks. If the TV is on another input (watching
+    Sky), flip to the Pi for those seconds and then put it back — the guest
+    presses the button, looks up, and Sky returns on its own."""
     global _pair_restore
-    d = _pair_load()
-    if not d.get("enabled", True):
+    if not pair_enabled():
         return False
+    d = _pair_load()
     now = time.time()
     if d.get("show_until", 0) > now - PAIR_SHOW_COOL:
         return True                      # already up (or only just down)
@@ -1355,18 +1359,20 @@ def listen_cec_udp():
             elif up in ("JOKE_ON", "JOKE_OFF"):
                 _set_joke_mode(up == "JOKE_ON")
             elif up in ("GUEST_ON", "GUEST_OFF"):
-                # Gate the guest web portal (it reads this file).
+                # Gate the guest web portal (it reads this file). Guest Mode is
+                # also the switch for the connection password, so switching it
+                # off drops the live code and takes it off screen.
                 state = "on" if up == "GUEST_ON" else "off"
                 log(f"Guest mode -> {state}")
                 try:
-                    with open("/tmp/pitv-guest-mode", "w") as f:
+                    with open(GUEST_MODE_FILE, "w") as f:
                         f.write(state)
                 except OSError:
                     pass
+                if state == "off":
+                    pair_clear()
             elif up == "PAIR_SHOW":
                 pair_show()
-            elif up in ("PAIR_ON", "PAIR_OFF"):
-                set_pair_mode(up == "PAIR_ON")
             elif up in ("SKY_POWER_ON", "SKY_POWER_OFF"):
                 sky_power(up.endswith("_ON"))
             elif up.startswith("SKY "):
@@ -2367,7 +2373,7 @@ def draw_pair_overlay(stdscr):
     left = time.time()
     left = max(0, int(_pair_load().get("show_until", 0) - left))
     lines = [
-        "GUEST PAIRING CODE",
+        "CONNECTION PASSWORD",
         "",
         "  ".join(code),
         "",
@@ -2388,21 +2394,6 @@ def draw_pair_overlay(stdscr):
             stdscr.addstr(top + i, max(0, (max_x - len(ln)) // 2), ln, attr)
         except curses.error:
             pass
-
-
-def draw_pair_hint(stdscr):
-    """A dim line in the corner of the menu so a guest can just look up and
-    type it — no button to find, no host to ask."""
-    code = pair_code()
-    if not code:
-        return
-    max_y, max_x = stdscr.getmaxyx()
-    txt = f"guest code {code}"
-    try:
-        stdscr.addstr(0, max(0, max_x - len(txt) - 1), txt,
-                      curses.color_pair(3) | curses.A_DIM)
-    except curses.error:
-        pass
 
 
 def draw_keypad(stdscr, game_name, entered, error, is_lock=False):
@@ -2854,15 +2845,12 @@ def main(stdscr):
         elif current_view == "CLEAR":
             pass
 
-        # Pairing code: a dim reminder on the menu, or the big panel over
-        # anything when a guest has asked for it.
+        # The connection password is only ever on screen when a guest has
+        # asked for it — never sitting in a corner for anyone to read.
         if pair_showing():
             draw_pair_overlay(stdscr)
         else:
             pair_restore_input()
-            if current_view in ("MENU", "GAMES_MENU", "DURATION_SELECT") \
-                    and pair_enabled():
-                draw_pair_hint(stdscr)
 
         stdscr.refresh()
         frame += 1
