@@ -28,13 +28,21 @@ when the game exits.
                  (1 press = 1 … 9 presses = 9; moving the cursor resets);
                  top button = hint (fills one square); bottom (B) = remove.
     freesweep -> right button reveals the square; top button flags a mine.
-    vitetris  -> on ONE controller in 2-player, the left stick is player 1 and
-                 the right stick is player 2 (WASD). If `screen remote` is on,
-                 player 2 is the SSH keyboard instead, so the whole controller
-                 stays player 1 (no split).
+    vitetris  -> on ONE controller in 2-player, the pad is SPLIT by control
+                 surface so the two players can't fight over the same axis:
+                   D-pad                   -> player 1 (arrows)
+                   either analog stick     -> player 2 (WASD)
+                   L shoulder / R shoulder -> P1 rotate / P2 rotate
+                 (a pad with no real D-pad keeps the old split: left stick P1,
+                 right stick P2 — there's nothing else to give player 1.)
+                 Previously the D-pad and the left stick both drove player 1,
+                 so whichever moved last won and the two players kept
+                 overriding each other. If `screen remote` is on, player 2 is
+                 the SSH keyboard instead, so the whole controller stays player
+                 1 and no split happens.
 
-Both the D-pad AND the left analog stick steer; a held direction
-auto-repeats so blocks keep sliding while you hold left/right.
+Outside that split, both the D-pad AND the left analog stick steer player 1;
+a held direction auto-repeats so blocks keep sliding while you hold left/right.
 
 REQUIREMENTS
   sudo apt install python3-evdev
@@ -58,7 +66,7 @@ from evdev import ecodes, UInput
 def _remote_running():
     """True if `screen remote on` (remote.py) is active — used to decide, for
     2-player Tetris, whether player 2 is the SSH keyboard (remote on) or the
-    controller's right analog stick (remote off)."""
+    controller's analog sticks (remote off)."""
     try:
         return subprocess.run(["pgrep", "-f", "remote.py"],
                               capture_output=True).returncode == 0
@@ -125,6 +133,18 @@ ALL_KEYS = sorted({
         list(p["x"].values()) + list(p["y"].values()) + list(p["buttons"].values())
     )
 })
+
+
+def _has_dpad(dev):
+    """True if the pad reports a real D-pad (ABS_HAT0X). A few pads route the
+    D-pad through ABS_X/ABS_Y instead — the Tetris split needs to know, because
+    on those there is no D-pad to hand player 1 separately from the stick."""
+    try:
+        abs_caps = dev.capabilities().get(ecodes.EV_ABS, [])
+        return any((c[0] if isinstance(c, tuple) else c) == ecodes.ABS_HAT0X
+                   for c in abs_caps)
+    except Exception:
+        return False
 
 
 def find_gamepads():
@@ -194,20 +214,30 @@ def main():
               "can write /dev/uinput.", flush=True)
         sys.exit(1)
 
-    # 2-player Tetris on ONE controller: the left analog stick is player 1,
-    # the right stick is player 2 (WASD). When `screen remote` is on, player 2
-    # is the SSH keyboard instead, so the whole controller stays player 1 and
-    # the right stick just mirrors the left (no split).
+    # 2-player Tetris on ONE controller. Split by control surface, not by
+    # stick: the D-pad is player 1 and BOTH analog sticks are player 2 (WASD).
+    # The old split (left stick = P1, right stick = P2) left the D-pad also
+    # driving P1, so the D-pad and the left stick overrode each other — and on
+    # pads that report their D-pad as ABS_X/ABS_Y there was no way to tell them
+    # apart at all. Giving each player their own surface removes the clash.
+    # When `screen remote` is on, player 2 is the SSH keyboard instead, so the
+    # whole controller stays player 1 (D-pad and both sticks all steer P1).
     split_tetris = (GAME == "vitetris"
                     and len(gamepads) == 1
                     and not _remote_running())
+    # Pads with no separate D-pad (it comes through as ABS_X/ABS_Y) can't do
+    # the surface split, so they keep the old one: left stick P1, right stick P2.
+    split_hat = split_tetris and _has_dpad(gamepads[0])
 
     print(f"Mapping {len(gamepads)} controller(s):", flush=True)
     for i, dev in enumerate(gamepads):
         print(f"  player {i + 1}: {dev.name} ({dev.path})", flush=True)
-    if split_tetris:
-        print("  vitetris split: left stick = P1, right stick = P2 (WASD)",
-              flush=True)
+    if split_hat:
+        print("  vitetris split: D-pad = P1 (arrows, L shoulder rotates), "
+              "sticks = P2 (WASD, R shoulder rotates)", flush=True)
+    elif split_tetris:
+        print("  vitetris split: no D-pad on this pad — left stick = P1, "
+              "right stick = P2 (WASD)", flush=True)
 
     def press(key):
         ui.write(ecodes.EV_KEY, key, 1)
@@ -229,7 +259,7 @@ def main():
             "hat":    {"x": 0, "y": 0},
             "stick":  {"x": 0, "y": 0},
             "repeat": {"x": [0, 0.0], "y": [0, 0.0]},  # [direction, next_time]
-            "rstick": {"x": 0, "y": 0},                 # right stick (Tetris P2)
+            "rstick": {"x": 0, "y": 0},                 # right stick
             "rrepeat":{"x": [0, 0.0], "y": [0, 0.0]},
             "digit":  0,
         }
@@ -266,9 +296,38 @@ def main():
                 return True
         return False
 
+    def split_button(pi, code):
+        """Tetris split only: give each player a rotate button of their own, so
+        neither has to flick a direction up to turn a piece. Returns True if it
+        handled the button."""
+        if not split_tetris or pi != 0:
+            return False
+        if code in (ecodes.BTN_TL, ecodes.BTN_TL2):     # L shoulder -> P1 rotate
+            press(ecodes.KEY_UP)
+            return True
+        if code in (ecodes.BTN_TR, ecodes.BTN_TR2):     # R shoulder -> P2 rotate
+            press(ecodes.KEY_W)
+            return True
+        return False
+
     def effective(pi, axis):
+        """Player 1's direction on one axis. Normally the D-pad wins and the
+        left stick is the fallback; in the Tetris split the D-pad is all of
+        player 1, because the sticks belong to player 2."""
         s = state[pi]
+        if split_tetris and pi == 0:
+            return s["hat"][axis] if split_hat else s["stick"][axis]
         return s["hat"][axis] if s["hat"][axis] != 0 else s["stick"][axis]
+
+    def p2_direction(pi, axis):
+        """Player 2's direction in the Tetris split: either stick, whichever is
+        pushed (left stick wins a tie), so it doesn't matter which one the
+        second player grabs. Without a D-pad it's the right stick alone, since
+        the left one is player 1."""
+        s = state[pi]
+        if not split_hat:
+            return s["rstick"][axis]
+        return s["stick"][axis] if s["stick"][axis] != 0 else s["rstick"][axis]
 
     def update_axis(pi, axis, now):
         """Reconcile the repeat timer for one axis of one player."""
@@ -287,10 +346,10 @@ def main():
             rep[1] = now + REPEAT_INTERVAL
 
     def update_raxis(pi, axis, now):
-        """Same as update_axis but for the right stick driving player 2's WASD
-        keys (Tetris split mode). Auto-repeats a held direction too."""
+        """Same as update_axis but for the analog sticks driving player 2's
+        WASD keys (Tetris split mode). Auto-repeats a held direction too."""
         keymap = PLAYERS[1][axis]            # player-2 key map (WASD)
-        want   = state[pi]["rstick"][axis]
+        want   = p2_direction(pi, axis)
         rep    = state[pi]["rrepeat"][axis]
         if want == 0:
             rep[0] = 0
@@ -320,6 +379,8 @@ def main():
                 try:
                     for event in key.fileobj.read():
                         if event.type == ecodes.EV_KEY and event.value == 1:
+                            if split_button(pi, event.code):
+                                continue
                             if game_button(pi, event.code):
                                 continue
                             k = btns.get(event.code)
@@ -341,8 +402,9 @@ def main():
                             elif code == ecodes.ABS_Y:
                                 s["stick"]["y"] = _dir(val)
                             elif code == ecodes.ABS_RX:
-                                # Right stick: player 2 in Tetris split mode,
-                                # otherwise it just mirrors the left stick (P1).
+                                # Right stick: tracked separately in Tetris
+                                # split mode (where both sticks are player 2),
+                                # otherwise it mirrors the left stick (P1).
                                 if split_tetris:
                                     s["rstick"]["x"] = _dir(val)
                                 else:

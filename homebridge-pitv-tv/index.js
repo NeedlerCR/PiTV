@@ -8,18 +8,29 @@
 //     navigation of the PiTV menu.
 //   - a *Kill Switch* (bridged Switch): while on, tv_menu keeps forcing the
 //     TV off; turning it off stops that.
+//   - a *Joke Mode* switch (bridged Switch): while on, tv_menu waits a random
+//     10-50 minutes and then drops the TV to standby, over and over.
 //
 // Everything is sent to tv_menu.py as a localhost UDP datagram
 // (127.0.0.1:8129). The official Homebridge service is sandboxed
 // (ProtectSystem=strict) so it can't write a /tmp FIFO, but it can always send
 // a localhost packet. tv_menu.py owns the CEC bus and runs the commands.
+//
+// Every datagram is SIGNED: "PITV1 <ts> <nonce> <hmac-sha256> <payload>",
+// keyed on a secret shared with tv_menu.py. deploy.sh writes it to
+// /etc/pitv/control.key and puts the Homebridge user in the 'pitv' group so
+// this plugin can read it; `controlKey`/`controlKeyFile` in the platform
+// config override that. Without the key tv_menu drops everything we send, and
+// the log below says so.
 //   TV_ON | TV_OFF        -> power
 //   CEC <tx frame>        -> input switching
 //   KEY <TOKEN>           -> menu navigation
 //   KILL_ON | KILL_OFF    -> kill switch
+//   JOKE_ON | JOKE_OFF    -> joke mode
 
-const dgram = require('dgram');
-const fs    = require('fs');
+const crypto = require('crypto');
+const dgram  = require('dgram');
+const fs     = require('fs');
 
 const PLUGIN_NAME   = 'homebridge-pitv-tv';
 const PLATFORM_NAME = 'PiTVTelevision';
@@ -31,6 +42,12 @@ const TV_STATE_FILE = '/tmp/pitv-tv-state';
 // tv_menu.py writes the TV's active input (CEC physical address like "10:00")
 // here, so the Home app's input selection reflects reality.
 const TV_INPUT_FILE = '/tmp/pitv-tv-input';
+// tv_menu.py writes joke mode's real state here (it clears it on boot, and
+// `screen joke on|off` flips it too), so the Home switch stays honest.
+const JOKE_STATE_FILE = '/tmp/pitv-joke-mode';
+// Shared secret for the signed control channel (see pitv_secrets.py).
+const CONTROL_KEY_FILES = ['/etc/pitv/control.key'];
+const CONTROL_PREFIX    = 'PITV1';
 
 // Broadcast "Active Source = <physical address>" so the TV switches input.
 // Initiator "1" = the Pi's CEC logical address (libcec registers as Recorder 1
@@ -68,11 +85,14 @@ class PiTVTelevisionPlatform {
     this.activeInput = 1;
     this.killOn      = false;
     this.guestOn     = false;
+    this.jokeOn      = false;
+    this.controlKey  = this.loadControlKey();
 
     this.api.on('didFinishLaunching', () => {
       this.publishTelevision();
       this.ensureKillSwitch();
       this.ensureGuestSwitch();
+      this.ensureJokeSwitch();
     });
   }
 
@@ -81,10 +101,49 @@ class PiTVTelevisionPlatform {
     this.accessories.push(accessory);
   }
 
-  // Fire-and-forget a UDP datagram to tv_menu.py.
+  // Read the shared control key: explicit config first, then the file
+  // deploy.sh sets up. Returns '' if we can't get one — every send then fails
+  // loudly rather than firing commands tv_menu will silently drop.
+  loadControlKey() {
+    if (this.config.controlKey) return String(this.config.controlKey).trim();
+    const paths = this.config.controlKeyFile
+      ? [this.config.controlKeyFile, ...CONTROL_KEY_FILES]
+      : CONTROL_KEY_FILES;
+    for (const p of paths) {
+      try {
+        const k = fs.readFileSync(p, 'utf8').trim();
+        if (k) {
+          this.log.info(`Control key loaded from ${p}.`);
+          return k;
+        }
+      } catch (e) { /* try the next one */ }
+    }
+    this.log.error(
+      'No control key: tv_menu.py will reject every command from this plugin. '
+      + 'Run ./deploy.sh on the Pi (it writes /etc/pitv/control.key and adds '
+      + 'the Homebridge user to the "pitv" group), then restart Homebridge. '
+      + 'Check it with: screen control status');
+    return '';
+  }
+
+  // Sign a payload the way pitv_secrets.CommandVerifier expects. The nonce
+  // makes each datagram single-use, so one captured off the wire is dead.
+  sign(payload) {
+    const ts    = Math.floor(Date.now() / 1000);
+    const nonce = crypto.randomBytes(8).toString('hex');
+    const sig   = crypto.createHmac('sha256', this.controlKey)
+      .update(`${ts}|${nonce}|${payload}`).digest('hex');
+    return `${CONTROL_PREFIX} ${ts} ${nonce} ${sig} ${payload}`;
+  }
+
+  // Fire-and-forget a signed UDP datagram to tv_menu.py.
   send(str) {
+    if (!this.controlKey) {
+      this.log.error(`Not sending "${str}": no control key (see the note above).`);
+      return;
+    }
     const client = dgram.createSocket('udp4');
-    client.send(Buffer.from(str), CEC_UDP_PORT, CEC_UDP_HOST, (err) => {
+    client.send(Buffer.from(this.sign(str)), CEC_UDP_PORT, CEC_UDP_HOST, (err) => {
       if (err) this.log.error(`UDP send "${str}" failed: ${err.message}`);
       else     this.log.info(`-> ${str}`);
       client.close();
@@ -270,5 +329,40 @@ class PiTVTelevisionPlatform {
       }
     }, 4000);
     this.log.info(`Guest Mode switch ready.`);
+  }
+
+  // Bridged Switch: the prank. While on, tv_menu waits a random 10-50 minutes
+  // and then sends one CEC standby, then picks a new delay and repeats.
+  ensureJokeSwitch() {
+    const name = 'Joke Mode';
+    const uuid = this.api.hap.uuid.generate(`${PLUGIN_NAME}:jokemode`);
+    let acc = this.accessories.find((a) => a.UUID === uuid);
+    if (!acc) {
+      acc = new this.api.platformAccessory(name, uuid);
+      acc.addService(Service.Switch, name);
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [acc]);
+      this.accessories.push(acc);
+    }
+    const svc = acc.getService(Service.Switch)
+      || acc.addService(Service.Switch, name);
+    const readJoke = () => {
+      try { return fs.readFileSync(JOKE_STATE_FILE, 'utf8').trim() === 'on'; }
+      catch (e) { return null; }
+    };
+    const jokeChar = svc.getCharacteristic(Characteristic.On)
+      .onGet(() => { const j = readJoke(); return j === null ? this.jokeOn : j; })
+      .onSet((value) => {
+        this.jokeOn = value;
+        this.send(value ? 'JOKE_ON' : 'JOKE_OFF');
+      });
+    // Reflect `screen joke on|off` (and the boot-time reset) back into Home.
+    setInterval(() => {
+      const j = readJoke();
+      if (j !== null && j !== this.jokeOn) {
+        this.jokeOn = j;
+        jokeChar.updateValue(j);
+      }
+    }, 4000);
+    this.log.info(`Joke Mode switch ready.`);
   }
 }

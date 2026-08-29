@@ -1,15 +1,17 @@
 import curses
+import hmac
 import json
-import math
 import os
 import random
+import secrets
 import re
 import selectors
 import shutil
 import subprocess
-import sys
 import threading
 import time
+
+import pitv_secrets
 
 # ─────────────────────────────────────────────────────────────────────
 # OPTIONAL DEPENDENCIES
@@ -23,7 +25,7 @@ except ImportError:
     EVDEV_OK = False
 
 # ChronosVer: vYYYY.MAJOR.MINOR.BUG
-VERSION = "v2026.2.3.1"
+VERSION = "v2026.3.2.0"
 
 # ─────────────────────────────────────────────────────────────────────
 # LOG SYSTEM
@@ -63,12 +65,13 @@ def log_clear() -> None:
 # Locked games are opened with a personal PIN. PINs are managed from the CLI
 # (`screen pin assign|list|remove|rename|revoke`) and stored per-person in
 # PIN_FILE, so the log records WHO opened each game. The emergency code is a
-# master that always works.
+# master that always works; it lives in ~/.pitv/emergency-code (device-only,
+# read fresh on every check) and is set with `screen emergency set <code>`.
 
-EMERGENCY_CODE  = "159753"
 FREE_GAMES      = set()          # every game requires a PIN
 OTP_MAX_FAILS   = 3
 PIN_FILE        = os.path.expanduser("~/.pitv/pins.json")
+LOCK_STATE_FILE = os.path.expanduser("~/.pitv/lock-state.json")
 
 
 def load_pins() -> dict:
@@ -84,13 +87,22 @@ def load_pins() -> dict:
 
 def verify_pin(code: str):
     """Return the player's name for a valid PIN, 'Emergency' for the master
-    code, or None. (Free games never reach here.)"""
-    if code == EMERGENCY_CODE:
+    code, or None. (Free games never reach here.)
+
+    Comparisons are constant-time so a PIN can't be recovered a digit at a
+    time by timing the keypad."""
+    if not code:
+        return None
+    if pitv_secrets.check_emergency_code(code):
         return "Emergency"
+    match = None
     for name, pin in load_pins().items():
-        if code and code == pin:
-            return name
-    return None
+        try:
+            if hmac.compare_digest(code, pin):
+                match = name      # no early return: every PIN costs the same
+        except TypeError:
+            continue              # a hand-edited, non-ASCII PIN — just skip it
+    return match
 
 
 def set_highscore_name(binary: str, who: str) -> None:
@@ -477,6 +489,9 @@ def listen_controllers() -> None:
 
         except Exception as e:
             log(f"Controller error: {e}")
+            for d in gamepads.values():
+                try: d.close()
+                except Exception: pass
             _controller_scan_event.set()
             time.sleep(1)
 
@@ -491,7 +506,11 @@ def listen_fifo():
         except Exception: pass
     try:
         os.mkfifo(FIFO_PATH)
-        os.chmod(FIFO_PATH, 0o666)
+        # 0660, not 0666: the FIFO is a command channel into the menu (and into
+        # a running game, as keystrokes). Only the PiTV user and its group —
+        # the `screen` CLI, remote.py and the two portals, which all run as
+        # that user — have any business writing it.
+        os.chmod(FIFO_PATH, 0o660)
     except Exception:
         pass
 
@@ -519,10 +538,41 @@ def listen_fifo():
                         _run_cec_cmd("on 0" if cmd == "TV_ON" else "standby 0")
                         continue
 
+                    # `screen joke on|off` — the same prank the Home switch arms.
+                    if cmd in ("JOKE_ON", "JOKE_OFF"):
+                        _set_joke_mode(cmd == "JOKE_ON")
+                        continue
+
+                    # Guest pairing: PAIR_SHOW puts the code up on the TV (the
+                    # portal's "show me the code" button); PAIR_ON/PAIR_OFF
+                    # turn the whole mechanism on or off.
+                    if cmd == "PAIR_SHOW":
+                        pair_show()
+                        continue
+
+                    # Sky Q. SKY_ON/SKY_OFF flip the master switch (off by
+                    # default); "SKY <TOKEN>" is one button press, and does
+                    # nothing at all while the switch is off.
+                    if cmd.startswith("SKY_ON"):
+                        parts = cmd.split()
+                        la  = parts[1] if len(parts) > 1 and parts[1].isdigit() else None
+                        alw = "ALWAYS" in parts
+                        _set_sky_mode(True, logical=la, always=alw)
+                        continue
+                    if cmd == "SKY_OFF":
+                        _set_sky_mode(False)
+                        continue
+                    if cmd in ("SKY_POWER_ON", "SKY_POWER_OFF"):
+                        sky_power(cmd.endswith("_ON"))
+                        continue
+                    if cmd.startswith("SKY "):
+                        sky_key(cmd[4:].strip())
+                        continue
+
                     # `screen unlock authorise <code>` clears a hard lockdown.
                     if cmd.startswith("UNLOCK "):
                         code = raw.split(" ", 1)[1].strip() if " " in raw else ""
-                        if code == EMERGENCY_CODE and hard_locked:
+                        if hard_locked and pitv_secrets.check_emergency_code(code):
                             _clear_hardlock()
                         else:
                             log("UNLOCK rejected")
@@ -544,16 +594,16 @@ def listen_fifo():
                     # HOME/CLEAR are always menu-level (HOME quits a game). Other
                     # keys drive a running external game via uinput injection, and
                     # otherwise feed the menu / built-in games through input_queue.
-                    if cmd in ("HOME", "CLEAR"):
+                    if cmd == "CLEAR":
                         input_queue.append(cmd)
+                    elif cmd in ("HOME", "UP", "DOWN", "LEFT", "RIGHT",
+                                 "SELECT", "BACK", "PLAY", "ENTER", "SPEED"):
+                        # Same routing as the Apple remote: a running game, the
+                        # Sky box if that's what's on screen, else the menu.
+                        route_remote_key(cmd)
                     elif (controller_mode == "GAME_EXTERNAL" and cmd in
-                          ("UP","DOWN","LEFT","RIGHT","SELECT","BACK","PLAY",
-                           "ENTER","SPACE","TAB","ESC","BKSP","SPEED")):
-                        _remote_inject("SELECT" if cmd == "ENTER" else cmd)
-                    elif cmd in ("UP","DOWN","LEFT","RIGHT","SELECT","BACK"):
-                        input_queue.append(cmd)
-                    elif cmd == "ENTER":
-                        input_queue.append("SELECT")
+                          ("SPACE", "TAB", "ESC", "BKSP")):
+                        _remote_inject(cmd)
                     elif cmd.startswith("RUN "):
                         parts   = raw.split(" ", 3)
                         art_key = parts[1].upper() if len(parts) > 1 else ""
@@ -658,6 +708,287 @@ CEC_UDP_PORT = 8129
 _CEC_TX_RE = re.compile(r"^tx([ ][0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2})*)+$")
 
 
+# ─────────────────────────────────────────────────────────────────────
+# SKY Q REMOTE  (off by default — `screen sky on`)
+# ─────────────────────────────────────────────────────────────────────
+#
+# The Sky Q box sits on the same HDMI-CEC bus as everything else, so the Pi can
+# drive it by sending User Control frames (opcode 0x44 pressed, 0x45 released)
+# to the box's logical address. That means the Apple Home / Control Centre
+# remote AND the web portal's D-pad can drive Sky, with no extra hardware.
+#
+# Sky needs "Control other devices"/HDMI-CEC enabled in its own settings
+# (Settings -> Setup -> Preferences) for any of this to land.
+#
+# OFF by default: nothing is sent to the Sky box until `screen sky on`.
+SKY_STATE_FILE  = os.path.expanduser("~/.pitv/sky.json")
+SKY_SRC_LA      = 1        # the Pi — libcec registers as Recorder 1
+SKY_DEFAULT_LA  = 3        # Sky Q as Tuner 1; `screen sky on <la>` overrides
+SKY_INPUT_PHYS  = "10:00"  # Sky on HDMI 1 (matches the `screen change` map)
+PITV_INPUT_PHYS = "20:00"  # the Pi on HDMI 2
+
+# CEC User Control codes (CEC 1.4, "UI command"). Only these are ever sent —
+# a token that isn't in this table is dropped rather than passed through.
+SKY_KEYS = {
+    "UP": 0x01, "DOWN": 0x02, "LEFT": 0x03, "RIGHT": 0x04,
+    "SELECT": 0x00, "OK": 0x00, "ENTER": 0x2B,
+    "BACK": 0x0D,                      # Sky's "back up"
+    "SKY": 0x09,                       # root menu = the Sky button
+    "GUIDE": 0x53,                     # TV Guide
+    "INFO": 0x35, "SPEED": 0x35,       # SPEED = the Apple remote's "i" button
+    "TEXT": 0x0B,
+    "PLAY": 0x44, "PAUSE": 0x46, "STOP": 0x45, "RECORD": 0x47,
+    "REWIND": 0x48, "FORWARD": 0x49,
+    "CH_UP": 0x30, "CH_DOWN": 0x31, "CH_PREV": 0x32,
+    "RED": 0x72, "GREEN": 0x73, "YELLOW": 0x74, "BLUE": 0x71,
+    **{str(d): 0x20 + d for d in range(10)},          # 0-9
+}
+
+
+def _load_sky() -> dict:
+    """Read fresh every time so `screen sky on` applies without a restart."""
+    try:
+        with open(SKY_STATE_FILE) as f:
+            d = json.load(f)
+        if isinstance(d, dict):
+            return d
+    except Exception:
+        pass
+    return {}
+
+
+def _save_sky(d: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(SKY_STATE_FILE), exist_ok=True)
+        with open(SKY_STATE_FILE, "w") as f:
+            json.dump(d, f)
+    except OSError:
+        pass
+
+
+def _sky_enabled() -> bool:
+    return bool(_load_sky().get("enabled"))
+
+
+def _sky_routes_keys() -> bool:
+    """Should a plain nav key (Apple remote, portal D-pad) drive Sky instead of
+    the PiTV menu right now?
+
+    Only when Sky mode is on AND the TV is actually showing the Sky input, so
+    the one remote drives whatever is on screen and the menu never becomes
+    undrivable. `screen sky on always` pins it to Sky for a box whose input
+    never reports over CEC."""
+    d = _load_sky()
+    if not d.get("enabled"):
+        return False
+    return bool(d.get("always")) or tv_input_phys == SKY_INPUT_PHYS
+
+
+def _set_sky_mode(on: bool, logical=None, always=None) -> dict:
+    d = _load_sky()
+    d["enabled"] = bool(on)
+    if logical is not None:
+        d["logical"] = int(logical)
+    if always is not None:
+        d["always"] = bool(always)
+    d.setdefault("logical", SKY_DEFAULT_LA)
+    d.setdefault("always", False)
+    _save_sky(d)
+    log(f"Sky Q control {'ON' if on else 'OFF'} "
+        f"(device {d['logical']}, always={d['always']})")
+    return d
+
+
+def sky_key(token: str) -> bool:
+    """Send one Sky button press. Returns False if Sky mode is off or the token
+    isn't one we know — nothing is ever sent to the bus in that case."""
+    d = _load_sky()
+    if not d.get("enabled"):
+        return False
+    code = SKY_KEYS.get(token.upper())
+    if code is None:
+        return False
+    la = int(d.get("logical", SKY_DEFAULT_LA)) & 0xF
+    hdr = f"{SKY_SRC_LA:X}{la:X}"
+    # Press and release in ONE cec-client run: cec-cmd.sh pipes the string in,
+    # so a newline gives us both frames without paying the bus-handover cost
+    # twice (which would make the remote feel half as responsive).
+    _run_cec_cmd(f"tx {hdr}:44:{code:02X}\ntx {hdr}:45")
+    log(f"Sky: {token.upper()} -> {hdr}:44:{code:02X}")
+    return True
+
+
+# Tokens the remote / portal / CLI may put into the menu queue.
+REMOTE_MENU_NAV = {"UP", "DOWN", "LEFT", "RIGHT", "SELECT", "BACK", "SPEED"}
+
+
+def route_remote_key(tok: str) -> None:
+    """One place that decides where a remote or portal nav key goes.
+
+    Order matters: a running game wins (it's on the PiTV input and its keys are
+    injected for real), then Sky if Sky is what's on screen, then the menu.
+    HOME is always the way back to PiTV — if Sky was driving, it also flips the
+    TV to the Pi's input, so you're never left pressing keys at a menu you
+    can't see."""
+    tok = tok.upper()
+    if tok == "HOME":
+        if _sky_routes_keys():
+            _run_cec_cmd("tx 1f:82:20:00")     # back to PiTV (HDMI 2)
+        input_queue.append("HOME")
+        return
+    if controller_mode == "GAME_EXTERNAL":
+        # ENTER behaves as SELECT here (Enter AND Space), so a remote's Enter
+        # still starts games whose prompt is "press SPACE to play".
+        _remote_inject("SELECT" if tok == "ENTER" else tok)
+        return
+    if _sky_routes_keys() and sky_key(tok):
+        return
+    q = "SPEED" if tok == "PLAY" else "SELECT" if tok == "ENTER" else tok
+    if q in REMOTE_MENU_NAV:
+        input_queue.append(q)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# GUEST PAIRING CODE  (proof of presence)
+# ─────────────────────────────────────────────────────────────────────
+#
+# The second half of a guest sign-in. After their account password the portal
+# asks for a "connection password" — a 6-digit code shown ON THE TV — so you
+# have to be able to see the screen to finish signing in. That is exactly what
+# someone who has merely VPN'd onto the network cannot do. It rotates every few
+# minutes, so a photo of the telly goes stale.
+#
+# It is never on screen unless asked for, and it only works while Guest Mode is
+# on: switch Guest Mode off and the code stops being shown and stops being
+# accepted. tv_menu owns it because it owns the screen; guest-portal.py reads
+# the same file to check it.
+PAIR_FILE       = os.path.expanduser("~/.pitv/pairing.json")
+GUEST_MODE_FILE = "/tmp/pitv-guest-mode"
+PAIR_ROTATE     = 300      # a code is good for 5 minutes
+PAIR_SHOW_SECS  = 30       # how long "show it on the TV" stays up
+PAIR_SHOW_COOL  = 20       # ignore repeat requests inside this
+_pair_restore   = None     # input to switch back to after showing the code
+
+
+_pair_cache = (0.0, {})
+
+
+def _pair_load() -> dict:
+    """Cached for a second: the render loop asks ~12 times a second and we are
+    the only writer, so re-reading the file every frame is pure waste on a Zero
+    2 W."""
+    global _pair_cache
+    now = time.time()
+    if now - _pair_cache[0] < 1.0:
+        return dict(_pair_cache[1])
+    try:
+        with open(PAIR_FILE) as f:
+            d = json.load(f)
+        if not isinstance(d, dict):
+            d = {}
+    except Exception:
+        d = {}
+    _pair_cache = (now, d)
+    return dict(d)
+
+
+def _pair_save(d: dict) -> None:
+    global _pair_cache
+    try:
+        os.makedirs(os.path.dirname(PAIR_FILE), exist_ok=True)
+        with open(PAIR_FILE, "w") as f:
+            json.dump(d, f)
+        os.chmod(PAIR_FILE, 0o600)
+    except OSError:
+        pass
+    _pair_cache = (time.time(), dict(d))
+
+
+def pair_enabled() -> bool:
+    """Tied to Guest Mode — there is no separate switch. Guest Mode off means
+    the code is neither shown nor accepted."""
+    try:
+        with open(GUEST_MODE_FILE) as f:
+            return f.read().strip().lower() == "on"
+    except OSError:
+        return False
+
+
+def pair_clear() -> None:
+    """Drop the live code and take it off screen (Guest Mode going off)."""
+    d = _pair_load()
+    if d.get("code") or d.get("show_until"):
+        d.pop("code", None)
+        d["show_until"] = 0
+        _pair_save(d)
+
+
+def pair_code() -> str:
+    """The current code, rotating it when it expires. `secrets`, not `random`:
+    it is a credential, however short-lived."""
+    if not pair_enabled():
+        return ""
+    d = _pair_load()
+    now = time.time()
+    if not d.get("code") or d.get("expires", 0) < now:
+        d["code"]    = f"{secrets.randbelow(1000000):06d}"
+        d["expires"] = now + PAIR_ROTATE
+        _pair_save(d)
+    return d["code"]
+
+
+def pair_showing() -> bool:
+    return _pair_load().get("show_until", 0) > time.time()
+
+
+def pair_show():
+    """Put the code up big for half a minute, as the portal's 'show me the
+    connection password' button asks. If the TV is on another input (watching
+    Sky), flip to the Pi for those seconds and then put it back — the guest
+    presses the button, looks up, and Sky returns on its own."""
+    global _pair_restore
+    if not pair_enabled():
+        return False
+    d = _pair_load()
+    now = time.time()
+    if d.get("show_until", 0) > now - PAIR_SHOW_COOL:
+        return True                      # already up (or only just down)
+    pair_code()                          # make sure one exists
+    d = _pair_load()
+    d["show_until"] = now + PAIR_SHOW_SECS
+    _pair_save(d)
+    # Don't yank the input out from under a running game — and during one the
+    # menu isn't drawing anyway, so there would be nothing to show.
+    if controller_mode != "GAME_EXTERNAL" and tv_input_phys not in (None, PITV_INPUT_PHYS):
+        _pair_restore = tv_input_phys
+        _run_cec_cmd(f"tx 1f:82:{PITV_INPUT_PHYS}")
+        log(f"Pairing code shown — input {tv_input_phys} -> PiTV, back after "
+            f"{PAIR_SHOW_SECS}s")
+    else:
+        log("Pairing code shown on the TV")
+    return True
+
+
+def pair_restore_input():
+    """Called from the render loop once the code comes down."""
+    global _pair_restore
+    if _pair_restore and not pair_showing():
+        back, _pair_restore = _pair_restore, None
+        _run_cec_cmd(f"tx 1f:82:{back}")
+        log(f"Pairing code hidden — input back to {back}")
+
+
+def sky_power(on: bool) -> bool:
+    """Sky Q's own standby, separate from the TV's."""
+    d = _load_sky()
+    if not d.get("enabled"):
+        return False
+    la = int(d.get("logical", SKY_DEFAULT_LA)) & 0xF
+    _run_cec_cmd(f"{'on' if on else 'standby'} {la}")
+    log(f"Sky: power {'on' if on else 'standby'} (device {la})")
+    return True
+
+
 def _run_cec_cmd(cmd_str):
     """Run cec-cmd.sh with its (chatty) output suppressed.
 
@@ -702,7 +1033,96 @@ def _set_kill_switch(on):
         log("Kill switch OFF")
 
 
+# ── Joke mode ────────────────────────────────────────────────────────
+# A prank switch: while it's on, wait a random 10–50 minutes, then quietly
+# ask the TV to go to standby, pick a fresh delay and do it again. The TV
+# looks like it's dying of its own accord rather than being switched off,
+# which is the whole joke. Unlike the kill switch it never re-sends standby,
+# so whoever's watching can just turn the TV straight back on.
+JOKE_MIN_MINUTES = 10
+JOKE_MAX_MINUTES = 50
+JOKE_STATE_FILE  = "/tmp/pitv-joke-mode"
+
+_joke_stop   = threading.Event()
+_joke_thread = None
+
+
+def _write_joke_state(on):
+    """Publish joke mode so the Homebridge switch (and `screen joke status`)
+    can see it — same pattern as /tmp/pitv-guest-mode."""
+    try:
+        with open(JOKE_STATE_FILE, "w") as f:
+            f.write("on" if on else "off")
+    except OSError:
+        pass
+
+
+def _set_joke_mode(on):
+    """HomeKit 'Joke Mode'. On: loop forever picking a random delay between
+    JOKE_MIN_MINUTES and JOKE_MAX_MINUTES and sending one CEC standby when it
+    expires. Off: stop; a delay already counting down is abandoned."""
+    global _joke_thread
+    if on:
+        if _joke_thread and _joke_thread.is_alive():
+            return
+        _joke_stop.clear()
+        _write_joke_state(True)
+
+        def _loop():
+            while not _joke_stop.is_set():
+                mins = random.randint(JOKE_MIN_MINUTES, JOKE_MAX_MINUTES)
+                log(f"Joke mode: TV off in {mins} min")
+                if _joke_stop.wait(mins * 60):
+                    return                     # switched off mid-countdown
+                log("Joke mode: TV off")
+                _run_cec_cmd("standby 0")      # one nudge, not the kill switch
+
+        _joke_thread = threading.Thread(target=_loop, daemon=True)
+        _joke_thread.start()
+        log("Joke mode ON")
+    else:
+        _joke_stop.set()
+        _write_joke_state(False)
+        log("Joke mode OFF")
+
+
+_write_joke_state(False)      # never come back from a reboot still pranking
+
+
 _hardlock_stop = threading.Event()
+
+
+def _save_lock_state():
+    """Persist the lockout to disk.
+
+    A lockdown that a power cycle clears isn't a lockdown — before this, pulling
+    the plug reset `hard_locked` to False and the Pi came back to a usable menu.
+    Now the state is written whenever it changes and restored at startup."""
+    try:
+        os.makedirs(os.path.dirname(LOCK_STATE_FILE), exist_ok=True)
+        with open(LOCK_STATE_FILE, "w") as f:
+            json.dump({"hard": hard_locked, "locked": system_locked}, f)
+        os.chmod(LOCK_STATE_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def _restore_lock_state():
+    """Called once at startup: come back up in whatever lock state we left in."""
+    global system_locked, current_view
+    try:
+        with open(LOCK_STATE_FILE) as f:
+            st = json.load(f)
+    except Exception:
+        return
+    if st.get("hard"):
+        log("Lockdown restored after restart — still locked down")
+        _start_hardlock()
+        current_view = "HARDLOCK"
+    elif st.get("locked"):
+        system_locked = True
+        current_view  = "LOCKED"
+        log("Lockout restored after restart")
 
 
 def _start_hardlock():
@@ -723,6 +1143,7 @@ def _start_hardlock():
             _run_cec_cmd("standby 0")          # kill switch: force TV off
             _hardlock_stop.wait(7)
     threading.Thread(target=_loop, daemon=True).start()
+    _save_lock_state()
     log("HARD LOCK engaged — screen blocked; TV forced off in 15s (then every 7s)")
 
 
@@ -737,10 +1158,14 @@ def _clear_hardlock():
     system_locked  = False
     otp_fail_count = lock_fail_count = 0
     lock_entered   = lock_error = ""
+    _save_lock_state()
     _run_cec_cmd("on 0")
     _run_cec_cmd("tx 1f:82:20:00")             # switch to PiTV (HDMI 2)
     current_view = "MENU"
     log("Authorised — hard lock cleared, TV on, input PiTV")
+
+
+_restore_lock_state()
 
 
 _remote_ui       = None
@@ -866,22 +1291,39 @@ def _inject_char(ch):
         _press_keys([mapped[0]], shift=mapped[1])
 
 
+_udp_reject_count = 0
+_udp_reject_logged = 0.0
+
+
 def listen_cec_udp():
-    """Control channel from homebridge-pitv-tv over localhost UDP.
+    """Authenticated control channel from homebridge-pitv-tv over localhost UDP.
+
+    EVERY datagram must be signed: "PITV1 <ts> <nonce> <hmac> <payload>", keyed
+    on the shared control key (see pitv_secrets.py). Unsigned, stale, replayed
+    or wrongly-keyed datagrams are counted and dropped. Before this, anything
+    that could reach the socket could switch the TV on, arm the kill switch or
+    open the guest portal.
 
     Homebridge is sandboxed and can't write our /tmp FIFO, but it can always
-    send a localhost datagram. Accepted messages:
+    send a localhost datagram. Accepted payloads:
       TV_ON / TV_OFF     -> CEC power on / standby (this process owns the bus)
       KILL_ON / KILL_OFF -> kill switch (keep the TV forced off)
+      JOKE_ON / JOKE_OFF -> joke mode (TV "dies" after a random 10-50 min)
       CEC tx <frame>     -> raw CEC frame, e.g. input switching (whitelisted)
-      KEY <TOKEN>        -> Apple Home / Control Centre remote. In the menu and
-                            built-in games it feeds input_queue; during an
-                            external game it's injected as a real keystroke via
-                            uinput. Tokens: UP/DOWN/LEFT/RIGHT/SELECT/PLAY/BACK/
-                            HOME/SPEED.
+      KEY <TOKEN>        -> Apple Home / Control Centre remote. Routed by
+                            route_remote_key(): a running game, the Sky box, or
+                            the PiTV menu. Tokens: UP/DOWN/LEFT/RIGHT/SELECT/
+                            PLAY/BACK/HOME/SPEED.
+      SKY <TOKEN>        -> explicit Sky Q button (portal Sky panel); ignored
+                            unless `screen sky on`.
+      SKY_POWER_ON/OFF   -> Sky Q's own standby
     """
     import socket
-    MENU_NAV = {"UP", "DOWN", "LEFT", "RIGHT", "SELECT", "BACK", "SPEED"}
+    global _udp_reject_count, _udp_reject_logged
+    verifier = pitv_secrets.CommandVerifier()
+    if not verifier.key:
+        log("CONTROL KEY MISSING — UDP control channel will reject everything. "
+            "Run ./deploy.sh (or: screen control status)")
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -892,39 +1334,51 @@ def listen_cec_udp():
     log(f"Control UDP listener ready on 127.0.0.1:{CEC_UDP_PORT}")
     while True:
         try:
-            data, _ = sock.recvfrom(128)
-            msg = data.decode("utf-8", "ignore").strip()
-            up  = msg.upper()
+            data, _ = sock.recvfrom(512)
+            if verifier.maybe_reload():
+                log("Control key changed — reloaded "
+                    f"(fingerprint {pitv_secrets.key_fingerprint(verifier.key)})")
+            raw = data.decode("utf-8", "ignore").strip()
+            msg, why = verifier.verify(raw)
+            if why:
+                # Never log the datagram itself — it could be someone else's
+                # valid command being replayed at us. Count and summarise.
+                _udp_reject_count += 1
+                if time.time() - _udp_reject_logged > 30:
+                    _udp_reject_logged = time.time()
+                    log(f"Control UDP: rejected ({why}); "
+                        f"{_udp_reject_count} refused so far")
+                continue
+            up = msg.upper()
             if up in ("TV_ON", "TV_OFF"):
                 log(f"HomeKit CEC: {up}")
                 _set_tv_power("on" if up == "TV_ON" else "off")
                 _run_cec_cmd("on 0" if up == "TV_ON" else "standby 0")
             elif up in ("KILL_ON", "KILL_OFF"):
                 _set_kill_switch(up == "KILL_ON")
+            elif up in ("JOKE_ON", "JOKE_OFF"):
+                _set_joke_mode(up == "JOKE_ON")
             elif up in ("GUEST_ON", "GUEST_OFF"):
-                # Gate the guest web portal (it reads this file).
+                # Gate the guest web portal (it reads this file). Guest Mode is
+                # also the switch for the connection password, so switching it
+                # off drops the live code and takes it off screen.
                 state = "on" if up == "GUEST_ON" else "off"
                 log(f"Guest mode -> {state}")
                 try:
-                    with open("/tmp/pitv-guest-mode", "w") as f:
+                    with open(GUEST_MODE_FILE, "w") as f:
                         f.write(state)
                 except OSError:
                     pass
+                if state == "off":
+                    pair_clear()
+            elif up == "PAIR_SHOW":
+                pair_show()
+            elif up in ("SKY_POWER_ON", "SKY_POWER_OFF"):
+                sky_power(up.endswith("_ON"))
+            elif up.startswith("SKY "):
+                sky_key(up[4:].strip())                   # no-op while Sky is off
             elif up.startswith("KEY "):
-                tok = up[4:].strip()
-                if tok == "HOME":
-                    input_queue.append("HOME")            # quit game / to menu
-                elif controller_mode == "GAME_EXTERNAL":
-                    _remote_inject(tok)                   # real keys into the game
-                else:
-                    if tok == "PLAY":
-                        q = "SPEED"          # play/pause speeds up Snake
-                    elif tok == "ENTER":
-                        q = "SELECT"
-                    else:
-                        q = tok
-                    if q in MENU_NAV:
-                        input_queue.append(q)             # menu + built-in games
+                route_remote_key(up[4:].strip())
             elif msg.startswith("CEC "):
                 frame = msg[4:].strip()
                 if _CEC_TX_RE.match(frame):
@@ -943,6 +1397,10 @@ threading.Thread(target=listen_controllers, daemon=True).start()
 threading.Thread(target=listen_cec_udp,     daemon=True).start()
 
 log("PiTV started")
+
+if pitv_secrets.is_default_emergency_code():
+    log("WARNING: emergency code is still the one published in git — "
+        "rotate it with: screen emergency set <6 digits>")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1525,7 +1983,8 @@ def run_mirror(stdscr):
     _reset_terminal()
     os.system("clear")
 
-    if not resolve_binary("uxplay"):
+    uxplay_bin = resolve_binary("uxplay")
+    if not uxplay_bin:
         print("\nuxplay is not installed. Install it with:\n"
               "  sudo apt install uxplay gstreamer1.0-plugins-bad \\\n"
               "      gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly\n"
@@ -1548,7 +2007,7 @@ def run_mirror(stdscr):
 
     def _launch(sink):
         return subprocess.Popen(
-            ["uxplay", "-n", "PiTV", "-vs", sink, "-avdec"],
+            [uxplay_bin, "-n", "PiTV", "-vs", sink, "-avdec"],
             stdout=logf, stderr=subprocess.STDOUT,
         )
 
@@ -1904,6 +2363,39 @@ def draw_hardlock(stdscr):
             pass
 
 
+def draw_pair_overlay(stdscr):
+    """The big 'here is the code' panel, drawn over whatever else is on screen
+    for PAIR_SHOW_SECS. Deliberately unmissable from across a room."""
+    code = pair_code()
+    if not code:
+        return
+    max_y, max_x = stdscr.getmaxyx()
+    left = time.time()
+    left = max(0, int(_pair_load().get("show_until", 0) - left))
+    lines = [
+        "CONNECTION PASSWORD",
+        "",
+        "  ".join(code),
+        "",
+        "Type this into the PiTV guest page",
+        f"It disappears in {left}s and changes every {PAIR_ROTATE // 60} minutes",
+    ]
+    top = max(0, (max_y - len(lines) - 2) // 2)
+    width = min(max_x - 2, max(len(x) for x in lines) + 8)
+    x0 = max(0, (max_x - width) // 2)
+    for i in range(len(lines) + 2):
+        try:
+            stdscr.addstr(top + i - 1, x0, " " * width, curses.A_REVERSE)
+        except curses.error:
+            pass
+    for i, ln in enumerate(lines):
+        attr = curses.A_REVERSE | (curses.A_BOLD if i in (0, 2) else curses.A_DIM)
+        try:
+            stdscr.addstr(top + i, max(0, (max_x - len(ln)) // 2), ln, attr)
+        except curses.error:
+            pass
+
+
 def draw_keypad(stdscr, game_name, entered, error, is_lock=False):
     """On-screen numpad. D-pad/joystick move, A enters, B deletes/back."""
     global keypad_row, keypad_col, lock_entered
@@ -1917,7 +2409,7 @@ def draw_keypad(stdscr, game_name, entered, error, is_lock=False):
     except curses.error:
         pass
 
-    disp = " ".join(d if is_lock else "_" for d in entered.ljust(6,"_"))
+    disp = " ".join("_" if d == "_" else "*" for d in entered.ljust(6, "_"))
     try:
         stdscr.addstr(3, max(0,(max_x-len(disp))//2), disp, curses.color_pair(4)|curses.A_BOLD)
     except curses.error:
@@ -1943,7 +2435,7 @@ def draw_keypad(stdscr, game_name, entered, error, is_lock=False):
             except curses.error:
                 pass
 
-    hint = "Open your authenticator app for the code"
+    hint = "Enter your player PIN"
     if is_lock:
         hint = "Enter emergency code to unlock system"
     controls = "D-pad/Stick: move   A: enter   B: delete (or back when empty)"
@@ -2097,9 +2589,10 @@ def main(stdscr):
                     if verify:
                         # A lockout is cleared ONLY by the emergency code —
                         # not by an ordinary player PIN.
-                        if entered == EMERGENCY_CODE:
+                        if pitv_secrets.check_emergency_code(entered):
                             system_locked = False
                             otp_fail_count = lock_fail_count = 0
+                            _save_lock_state()
                             log("System unlocked via emergency code")
                             current_view = "MENU"
                         else:
@@ -2285,6 +2778,7 @@ def main(stdscr):
                             if otp_fail_count >= OTP_MAX_FAILS:
                                 log("Max failures — system locked")
                                 system_locked = True
+                                _save_lock_state()
                                 current_view  = "LOCKED"
                             else:
                                 keypad_error   = f"WRONG PIN — {remaining} attempt(s) left"
@@ -2350,6 +2844,13 @@ def main(stdscr):
 
         elif current_view == "CLEAR":
             pass
+
+        # The connection password is only ever on screen when a guest has
+        # asked for it — never sitting in a corner for anyone to read.
+        if pair_showing():
+            draw_pair_overlay(stdscr)
+        else:
+            pair_restore_input()
 
         stdscr.refresh()
         frame += 1

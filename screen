@@ -6,6 +6,7 @@ set -euo pipefail
 FIFO="/tmp/tv_menu.fifo"
 REMOTE_SCRIPT="/opt/pitv/remote.py"
 TV_INPUT_FILE="/tmp/pitv-tv-input"
+JOKE_STATE_FILE="/tmp/pitv-joke-mode"
 PI_INPUT="20:00"   # HDMI 2
 SKY_INPUT="10:00"  # HDMI 1
 
@@ -49,12 +50,42 @@ Player PINs (unlock locked games; the log records who played):
 System:
   screen version                        show the PiTV version
   screen unlock authorise <code>        clear a full lockdown
+  screen joke on|off|status             joke mode: after a random 10-50 min
+                                        the TV "dies" on its own, then again
+  screen emergency status               is the master code still the default?
+  screen emergency set <6 digits>       set the master (emergency) code
+
+Sky Q (OFF by default — nothing is sent to the Sky box until you turn it on):
+  screen sky on [<la>] [always]         enable; optional CEC device number
+                                        (default 3) and 'always' to route keys
+                                        to Sky even when the input is unknown
+  screen sky off                        disable (the default)
+  screen sky status                     show the setting
+  screen sky <button>                   press one button, e.g.
+                                        guide info sky back up down left right
+                                        ok play pause stop record rewind
+                                        forward ch_up ch_down red green yellow
+                                        blue 0-9
+  screen sky power on|off               Sky Q's own standby
+
+Access control:
+  screen control status                 signed-command channel: key, who can
+                                        read it, whether Homebridge can
+  screen control key show               print the shared control key
+  screen control key rotate             new key (re-run deploy.sh after)
+  screen network status                 which client addresses may use the
+                                        web portals
+  screen network allow <cidr>           e.g. 192.168.1.0/24 — repeatable
+  screen network clear                  allow any address again (the default)
 
 Guest web portal (port 8080, only when Home 'Guest Mode' is on):
   screen guest password set <name> <pw> create/update a guest login
   screen guest list                     list guests + their NFC links
   screen guest remove <name>            delete a guest
   screen guest kick all                 sign out ALL guests immediately
+  screen guest code                     show the connection password + status
+  screen guest code show                put it on the TV for 30 seconds
+  screen guest lock on|off|status       pause/resume the guests' buttons
   screen pin guest rotate all           fresh player PINs for all guests
 
 Admin web portal (http://raspberrypi.local, username + password):
@@ -90,9 +121,13 @@ _send() {
         || { echo "Error: timeout writing to FIFO" >&2; exit 1; }
 }
 
+# Both senders quote the payload with printf %q before it reaches `bash -c`,
+# so a $(...) or backtick in an argument is written to the FIFO as text rather
+# than executed. Callers upper-case what they pass to _send; _send_raw is for
+# lines that must keep their case (e.g. "UNLOCK <code>").
 _send_raw() {
     _check_fifo
-    timeout 3 bash -c "echo \"$1\" > '$FIFO'" 2>/dev/null \
+    timeout 3 bash -c "echo $(printf '%q' "$1") > '$FIFO'" 2>/dev/null \
         || { echo "Error: timeout writing to FIFO" >&2; exit 1; }
 }
 
@@ -169,8 +204,23 @@ case "$CMD" in
         ;;
 
     guest)
-        shift
-        exec python3 /opt/pitv/guest-admin.py "$@"
+        case "${2:-}" in
+            code)
+                if [[ "${3:-}" == "show" ]]; then
+                    _send_raw "PAIR_SHOW"
+                    echo "The connection password is on the TV for 30 seconds."
+                else
+                    exec python3 /opt/pitv/guest-admin.py code
+                fi
+                ;;
+            lock)
+                exec python3 /opt/pitv/guest-admin.py lock "${3:-status}"
+                ;;
+            *)
+                shift
+                exec python3 /opt/pitv/guest-admin.py "$@"
+                ;;
+        esac
         ;;
 
     admin)
@@ -189,6 +239,79 @@ case "$CMD" in
 
     version)
         cat /opt/pitv/VERSION 2>/dev/null || echo "unknown"
+        ;;
+
+    joke)
+        case "${2:-}" in
+            on)
+                _send_raw "JOKE_ON"
+                echo "Joke mode armed — the TV will drop out in 10-50 minutes."
+                ;;
+            off)
+                _send_raw "JOKE_OFF"
+                echo "Joke mode off."
+                ;;
+            status|"")
+                STATE=""
+                if [[ -f "$JOKE_STATE_FILE" ]]; then
+                    STATE="$(tr -d '[:space:]' < "$JOKE_STATE_FILE")"
+                fi
+                if [[ "$STATE" == "on" ]]; then
+                    echo "Joke mode: ON"
+                else
+                    echo "Joke mode: off"
+                fi
+                ;;
+            *)
+                echo "Usage: screen joke on|off|status" >&2; exit 1 ;;
+        esac
+        ;;
+
+    emergency)
+        shift
+        exec python3 /opt/pitv/pin-admin.py emergency "$@"
+        ;;
+
+    sky)
+        case "${2:-status}" in
+            on)
+                ARGS=""
+                [[ -n "${3:-}" ]] && ARGS=" ${3^^}"
+                [[ -n "${4:-}" ]] && ARGS="${ARGS} ${4^^}"
+                _send_raw "SKY_ON${ARGS}"
+                echo "Sky Q control ON.  (Sky needs HDMI-CEC enabled: Settings"
+                echo "-> Setup -> Preferences -> Control other devices.)"
+                ;;
+            off)
+                _send_raw "SKY_OFF"
+                echo "Sky Q control OFF."
+                ;;
+            status)
+                exec python3 /opt/pitv/pitv-config.py status
+                ;;
+            power)
+                case "${3:-}" in
+                    on)  _send_raw "SKY_POWER_ON";  echo "Sky Q: on" ;;
+                    off) _send_raw "SKY_POWER_OFF"; echo "Sky Q: standby" ;;
+                    *)   echo "Usage: screen sky power on|off" >&2; exit 1 ;;
+                esac
+                ;;
+            *)
+                _send_raw "SKY ${2^^}"
+                echo "Sky: ${2^^}   (nothing happens while 'screen sky status'"
+                echo "says OFF, or if the button name isn't one Sky knows)"
+                ;;
+        esac
+        ;;
+
+    control)
+        shift
+        exec python3 /opt/pitv/pitv-config.py control "$@"
+        ;;
+
+    network)
+        shift
+        exec python3 /opt/pitv/pitv-config.py network "$@"
         ;;
 
     unlock)

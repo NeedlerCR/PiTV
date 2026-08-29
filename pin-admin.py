@@ -11,15 +11,22 @@ file to unlock locked games, logging who used which PIN.
   screen pin remove <name>     delete a person's PIN
   screen pin revoke <name>     alias for remove
   screen pin rename <old> <new>
+
+Also owns the emergency (master) code, which lives device-only in
+~/.pitv/emergency-code:
+
+  screen emergency status      is it still the code published in git?
+  screen emergency set <code>  set a new 6-digit master code
 """
 
 import json
 import os
-import random
+import secrets
 import sys
 
-PIN_FILE       = os.path.expanduser("~/.pitv/pins.json")
-EMERGENCY_CODE = "159753"   # reserved; never auto-generate this
+import pitv_secrets
+
+PIN_FILE = os.path.expanduser("~/.pitv/pins.json")
 
 
 def load() -> dict:
@@ -42,11 +49,38 @@ def save(d: dict) -> None:
 
 
 def new_pin(existing: dict) -> str:
-    used = set(existing.values()) | {EMERGENCY_CODE}
+    """A fresh PIN nobody else holds. `secrets` rather than `random`: these
+    unlock the games, and random's Mersenne Twister is predictable from a
+    handful of outputs — which `screen pin list` hands you."""
+    used = set(existing.values()) | {pitv_secrets.emergency_code()}
     while True:
-        pin = f"{random.randint(0, 999999):06d}"
+        pin = f"{secrets.randbelow(1000000):06d}"
         if pin not in used:
             return pin
+
+
+def cmd_emergency(args) -> None:
+    """screen emergency status | set <6 digits>"""
+    sub = args[0].lower() if args else "status"
+    if sub == "status":
+        if pitv_secrets.is_default_emergency_code():
+            print("Emergency code: STILL THE DEFAULT that is published in git.")
+            print("Set your own now:  screen emergency set <6 digits>")
+            sys.exit(1)
+        print(f"Emergency code: set (stored in {pitv_secrets.EMERGENCY_FILE}).")
+        return
+    if sub == "set":
+        code = args[1] if len(args) > 1 else ""
+        if not (code.isdigit() and len(code) == 6):
+            print("The emergency code must be exactly 6 digits."); sys.exit(1)
+        clash = next((n for n, p in load().items() if p == code), None)
+        if clash:
+            print(f"That code is {clash}'s player PIN — pick another."); sys.exit(1)
+        if not pitv_secrets.set_emergency_code(code):
+            print(f"Could not write {pitv_secrets.EMERGENCY_FILE}."); sys.exit(1)
+        print("Emergency code updated. It takes effect immediately — no restart.")
+        return
+    print("Usage: screen emergency <status|set <6 digits>>"); sys.exit(1)
 
 
 def show(d: dict) -> None:
@@ -60,7 +94,12 @@ def show(d: dict) -> None:
 def main() -> None:
     args = sys.argv[1:]
     cmd  = args[0].lower() if args else "list"
-    d    = load()
+
+    if cmd == "emergency":
+        cmd_emergency(args[1:])
+        return
+
+    d = load()
 
     if cmd == "list":
         show(d)
@@ -79,7 +118,7 @@ def main() -> None:
         if custom_pin is not None:
             if not (custom_pin.isdigit() and len(custom_pin) == 6):
                 print("Custom PIN must be exactly 6 digits."); sys.exit(1)
-            if custom_pin == EMERGENCY_CODE:
+            if custom_pin == pitv_secrets.emergency_code():
                 print("That PIN is reserved (emergency code)."); sys.exit(1)
             clash = next((n for n, p in d.items() if p == custom_pin and n != name), None)
             if clash:

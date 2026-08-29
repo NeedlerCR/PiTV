@@ -10,7 +10,9 @@ in `VERSION` (and `tv_menu.py`'s `VERSION`), shown by `screen version`.
 Security escalation: 3 wrong game PINs → lockout keypad; 3 wrong tries there →
 **full lockdown** (`hard_locked`): the TV is forced off every 7 s and the
 screen is blocked. Only `screen unlock authorise <emergency code>` clears it
-(kill switch off, TV on, input → PiTV).
+(kill switch off, TV on, input → PiTV). Both lock states are persisted to
+`~/.pitv/lock-state.json` and restored at startup, so power-cycling the Pi no
+longer clears a lockdown.
 
 ## Git settings
 
@@ -27,6 +29,8 @@ screen is blocked. Only `screen unlock authorise <emergency code>` clears it
   the service, offers a reboot).
 - Logs: `/tmp/pitv.log` (menu), `/tmp/pitv-mapper.log` (controller mapper),
   `/tmp/pitv-game.log` (last game's stderr), `/tmp/uxplay.log` (mirroring).
+- Shared modules: `pitv_secrets.py` (emergency code, password hashing, signed
+  commands) and `pitv-config.py` (the `screen sky|control|network` settings).
 
 ## Input paths (how the menu and games are driven)
 
@@ -40,11 +44,15 @@ screen is blocked. Only `screen unlock authorise <emergency code>` clears it
    WASD + F/G. `run_game()` passes the game binary as `argv[1]`, so a few games
    get tailored buttons: **nudoku** (right button types a number by pressing it
    that many times, top = hint, bottom/B = remove) and **freesweep** (right =
-   reveal, top = flag). For **vitetris** 2-player on a single pad, the left
-   stick is P1 and the right stick is P2 (WASD) — unless `screen remote` is on,
-   in which case P2 is the SSH keyboard and the whole pad stays P1
-   (`_remote_running()` decides). vitetris's Player-2 keys must be set to
-   W/A/S/D (+ rotate) once in its own Options menu for this to reach P2.
+   reveal, top = flag). For **vitetris** 2-player on a single pad the
+   pad is split by *control surface*, so the two players can't fight over the
+   same axis: the **D-pad is P1** (arrows, L shoulder rotates) and **either
+   analog stick is P2** (WASD, R shoulder rotates). A pad with no real D-pad
+   (ABS_HAT0X absent) falls back to the old split — left stick P1, right stick
+   P2. Unless `screen remote` is on, in which case P2 is the SSH keyboard and
+   the whole pad stays P1 (`_remote_running()` decides). vitetris's Player-2
+   keys must be set to W/A/S/D (+ rotate) once in its own Options menu for this
+   to reach P2.
 3. **CEC remote** (`listen_cec_remote`) and the **FIFO** `/tmp/tv_menu.fifo`
    (written by the `screen` CLI, `remote.py`, and the web portals) also feed
    `input_queue`. During an external game, FIFO nav tokens and `TYPE <char>`
@@ -110,6 +118,28 @@ scrolls now that the list is long — the highlighted card stays in view with
 (portrait) shape, falling back to a fullscreen sink if that fails.
 Needs `uxplay` + gstreamer plugins + `avahi-daemon` (mDNS).
 
+## Sky Q remote (off by default)
+
+The Sky Q box is on the same CEC bus, so `tv_menu` can drive it by sending
+User Control frames (`0x44` pressed / `0x45` released) to its logical address —
+no extra hardware. **Nothing is sent until `screen sky on`**; the state lives in
+`~/.pitv/sky.json` (`enabled`, `logical`, `always`) and is read fresh on every
+key. Sky needs *Settings → Setup → Preferences → Control other devices* on.
+
+- `SKY_KEYS` is the whole vocabulary (nav, Sky/Guide/Info, transport, CH ±,
+  colour buttons, 0-9). A token that isn't in it is dropped — nothing else ever
+  reaches the bus.
+- `route_remote_key()` is the single place deciding where a nav key goes: a
+  running game first, then Sky **while the TV is on the Sky input** (or always,
+  with `screen sky on always`), else the PiTV menu. `HOME` is always the escape
+  hatch — it switches the TV back to the Pi's input and returns to the menu.
+- Both remotes reach it: the **Apple Home / Control Centre** remote via
+  `KEY <TOKEN>` on the UDP channel, and the **web portal**, which grows a Sky
+  panel (Guide, Info, transport, CH ±, colours, Sky standby) whenever Sky mode
+  is on. The portal only ever sends fixed tokens from `SKY_BUTTONS`.
+- CLI: `screen sky on [<la>] [always]`, `screen sky off`, `screen sky status`,
+  `screen sky <button>`, `screen sky power on|off`.
+
 ## HomeKit TV (Homebridge)
 
 `homebridge-pitv-tv/` is a local Homebridge platform plugin that publishes a
@@ -118,18 +148,96 @@ Needs `uxplay` + gstreamer plugins + `avahi-daemon` (mDNS).
 *not* inside the bridge. It talks to `tv_menu.py` over a **localhost UDP
 datagram** to `127.0.0.1:8129` (the `listen_cec_udp` thread), which accepts:
 `TV_ON`/`TV_OFF` (power → `cec-cmd.sh on 0`/`standby 0`), `CEC tx <frame>`
-(input switching via a whitelisted raw CEC frame), and `KEY <TOKEN>` (menu
+(input switching via a whitelisted raw CEC frame), `KEY <TOKEN>` (menu
 navigation, so the **Apple Home / Control Centre remote** drives the menu by
-feeding `input_queue`). UDP is used because the official Homebridge service is
-sandboxed (`ProtectSystem=strict`) and can't write a `/tmp` FIFO, but it can
-always send a localhost packet. `tv_menu.py` owns the CEC bus and runs
-`cec-cmd.sh` itself with output suppressed (so it never scribbles on the menu).
+feeding `input_queue`), and `JOKE_ON`/`JOKE_OFF` (see below). UDP is used
+because the official Homebridge service is sandboxed (`ProtectSystem=strict`)
+and can't write a `/tmp` FIFO, but it can always send a localhost packet.
+**Every datagram must be signed** (see *Authenticated commands* below).
+`tv_menu.py` owns the CEC bus and runs `cec-cmd.sh` itself with output
+suppressed (so it never scribbles on the menu).
 Power state is bidirectional: `listen_cec_remote` polls the TV's CEC power
 status and writes `on`/`off` to `/tmp/pitv-tv-state`, which the plugin reads +
 polls so the physical remote is reflected in the Home app.
+
+**Joke Mode** is a bridged switch (alongside the kill switch and Guest Mode):
+while it's on, `_set_joke_mode` waits a random **10–50 minutes**, sends one CEC
+standby so the TV appears to die on its own, then picks a fresh delay and
+repeats. Unlike the kill switch it never re-sends standby, so the TV can just be
+switched back on. State lives in `/tmp/pitv-joke-mode` (cleared at boot, so a
+reboot never comes back still pranking); the plugin polls it, and
+`screen joke on|off|status` drives the same thing over the FIFO.
+
 `deploy.sh` reinstalls the plugin into Homebridge (npm copies it at install
 time, so refreshing `/opt/pitv` alone isn't enough).
 (`tv-state.sh` was the older homebridge-cmd4 approach and is superseded.)
+
+## Guest sign-in: password, then the connection password
+
+Two steps, the second of which is **proof that you can see the telly** — which
+is exactly what someone who has VPN'd onto the network cannot do.
+
+1. The guest enters their account password (`check_password`). That buys a
+   **half-session** only: `half:<user>` in the signed cookie, good for 10
+   minutes, granting no control of anything (`verify_half`).
+2. The page then offers **"Show me the connection password"**. Pressing it asks
+   `tv_menu` to put a 6-digit code on the TV and the button **morphs into the
+   box you type it into** (`connect_body`). `POST /connect` checks it
+   (`check_pairing`) and issues the real session.
+
+- The code lives in `~/.pitv/pairing.json` (0600), comes from `secrets`, and
+  rotates every 5 minutes so a photo of the TV goes stale. It is **never on
+  screen unless asked for** — there is no corner hint.
+- **Guest Mode is its only switch.** Off ⇒ no code is minted, none is accepted,
+  and `pair_clear()` wipes the live one.
+- `pair_show()` puts it up for 30 s (`draw_pair_overlay`). If the TV is on
+  another input, PiTV borrows it and switches back by itself — except during a
+  game, when the input is left alone. `/pair/show` needs a half-session, so
+  only someone who already knows a guest password can make the TV flash, and a
+  cooldown stops even them repeating it.
+- Wrong codes feed the same per-IP lockout as passwords.
+- CLI: `screen guest code`, `screen guest code show`.
+
+## Lock switch and live pages
+
+- **Lock** is the admin's temporary pause: `/tmp/pitv-guest-lock` (so a reboot
+  clears it), toggled from the admin portal or `screen guest lock on|off`.
+  Guests keep their session, every control greys out (`body.locked`), and
+  `/action` answers **423 Locked** — the server refuses, so a stale tab gets
+  nowhere. Admins are unaffected.
+- **Pages update themselves.** Every signed-in page polls `/state` every 3 s
+  (`POLL_SECONDS`) for `{guest_mode, locked, sky, pin}`. A 401 means "you are
+  no longer signed in" and the page goes back to the login screen — so
+  `screen guest kick all`, Guest Mode going off, or a lock lands within
+  seconds instead of whenever someone happens to reload. A changed PIN updates
+  in place; Sky mode appearing reloads the page. Tabs also re-sync on
+  `visibilitychange`, so a phone coming out of a pocket is current at once.
+
+## Authenticated commands
+
+Nothing drives the TV on trust any more:
+
+- **UDP control channel** — each datagram is
+  `PITV1 <ts> <nonce> <hmac-sha256> <payload>`, keyed on a secret shared with
+  Homebridge and the portals (`pitv_secrets.sign_command` /
+  `CommandVerifier`). Unsigned, stale (>120 s), replayed or wrongly-keyed
+  datagrams are counted and dropped, never logged verbatim. The socket is still
+  bound to `127.0.0.1` only.
+- **The key** lives in `/etc/pitv/control.key`, mode 0640, group `pitv`;
+  `deploy.sh` creates it and puts the PiTV user *and* the Homebridge user in
+  that group (the plugin also accepts `controlKey`/`controlKeyFile` in its
+  Homebridge config). `~/.pitv/control-key` is the fallback. `tv_menu` notices a
+  rotated key without a restart. `screen control status` shows the fingerprint,
+  who can read the file and whether Homebridge can; `screen control key
+  show|rotate` manages it.
+- **The FIFO** is 0660, not 0666 — it's a command channel into the menu (and,
+  during a game, into the game as keystrokes), so only the PiTV user and group
+  may write it.
+- **Portal allowlist** — `screen network allow <cidr>` restricts which client
+  addresses may reach the web portals at all; the connection is dropped in
+  `verify_request` before the login page is served, so a VPN range you haven't
+  allowed never even sees it. Empty (the default) means anyone who can route to
+  the Pi, as before. `screen network status` / `screen network clear`.
 
 ## Guest web portal
 
@@ -138,10 +246,14 @@ time, so refreshing `/opt/pitv` alone isn't enough).
 menu via an on-screen **D-pad** — but ONLY while the Home **Guest Mode** switch
 is ON. The plugin's Guest Mode switch sends `GUEST_ON`/`GUEST_OFF` over the 8129
 UDP channel; `tv_menu` writes `/tmp/pitv-guest-mode`, which the portal reads.
-Guests sign in with a password (`screen guest password set <user> <pw>`) or an
-NFC link `/nfc?t=<token>` (1-week HMAC-signed cookie that redirects to hide the
-URL), see their assigned player PIN (rotates weekly or via
-`screen pin guest rotate all`), and cannot use the kill switch or admin.
+Guests sign in with a password plus the connection password on the TV (see
+above), or with an NFC link `/nfc?t=<token>` (a tap is already proof of
+presence, so it signs straight in; 1-week HMAC-signed cookie that redirects to
+hide the URL). They see their assigned player PIN (rotates weekly — checked on
+each page load, not just at startup — or via `screen pin guest rotate all`),
+and cannot use the kill switch or admin. Both portals throttle failed logins
+(and bad NFC tokens) per client IP with a doubling lockout, cap request bodies, send a CSP plus
+`nosniff`/`DENY`/`no-referrer`, and refuse a cross-origin POST.
 Actuation: TV/input via the 8129 UDP channel, menu nav by writing the FIFO.
 Data lives in `~/.pitv/guests.json` + `~/.pitv/pins.json` (device-only).
 
@@ -159,9 +271,22 @@ bypass code are **device-only**. Keep them out of git. If any leaks into the
 repo, rotate it. Config files that contain them (e.g. `~/.homebridge/config.json`)
 live on the Pi, not here.
 
+`pitv_secrets.py` is the one place that handles them:
+
+- **Emergency code** — lives in `~/.pitv/emergency-code` (0600), read fresh on
+  every check, set with `screen emergency set <6 digits>`. It used to be
+  hardcoded in `tv_menu.py`, `guest-portal.py` and `pin-admin.py`, so the
+  shipped value (`LEGACY_EMERGENCY_CODE`) is **public in git history** — it is
+  kept only to seed the file on upgrade. `screen emergency status` says whether
+  a Pi is still on it, and `tv_menu` logs a warning at boot while it is.
+- **Portal passwords** — PBKDF2-HMAC-SHA256, per-record salt and iteration
+  count (`hash_password` / `verify_password`). Records written by older
+  versions (one round of salted SHA-256) still verify and are upgraded in place
+  on the owner's next sign-in.
+- **Player PINs** and NFC tokens come from `secrets`, never `random`.
+
 ## Branch / deploy workflow
 
-Development branch: `claude/pitv-onboarding-gu3vbq`, pushed to the remote
-`claude` branch (the remote can't hold `claude/…` because a ref named
-`claude` already occupies that namespace). After pulling on the Pi:
-`git pull origin claude && ./deploy.sh`.
+Development branch: **`experimental`**, pushed to the remote branch of the same
+name and merged to `main` by PR. After pulling on the Pi:
+`git pull origin experimental && ./deploy.sh`.
