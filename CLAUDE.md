@@ -29,6 +29,8 @@ longer clears a lockdown.
   the service, offers a reboot).
 - Logs: `/tmp/pitv.log` (menu), `/tmp/pitv-mapper.log` (controller mapper),
   `/tmp/pitv-game.log` (last game's stderr), `/tmp/uxplay.log` (mirroring).
+- Shared modules: `pitv_secrets.py` (emergency code, password hashing, signed
+  commands) and `pitv-config.py` (the `screen sky|control|network` settings).
 
 ## Input paths (how the menu and games are driven)
 
@@ -116,6 +118,28 @@ scrolls now that the list is long — the highlighted card stays in view with
 (portrait) shape, falling back to a fullscreen sink if that fails.
 Needs `uxplay` + gstreamer plugins + `avahi-daemon` (mDNS).
 
+## Sky Q remote (off by default)
+
+The Sky Q box is on the same CEC bus, so `tv_menu` can drive it by sending
+User Control frames (`0x44` pressed / `0x45` released) to its logical address —
+no extra hardware. **Nothing is sent until `screen sky on`**; the state lives in
+`~/.pitv/sky.json` (`enabled`, `logical`, `always`) and is read fresh on every
+key. Sky needs *Settings → Setup → Preferences → Control other devices* on.
+
+- `SKY_KEYS` is the whole vocabulary (nav, Sky/Guide/Info, transport, CH ±,
+  colour buttons, 0-9). A token that isn't in it is dropped — nothing else ever
+  reaches the bus.
+- `route_remote_key()` is the single place deciding where a nav key goes: a
+  running game first, then Sky **while the TV is on the Sky input** (or always,
+  with `screen sky on always`), else the PiTV menu. `HOME` is always the escape
+  hatch — it switches the TV back to the Pi's input and returns to the menu.
+- Both remotes reach it: the **Apple Home / Control Centre** remote via
+  `KEY <TOKEN>` on the UDP channel, and the **web portal**, which grows a Sky
+  panel (Guide, Info, transport, CH ±, colours, Sky standby) whenever Sky mode
+  is on. The portal only ever sends fixed tokens from `SKY_BUTTONS`.
+- CLI: `screen sky on [<la>] [always]`, `screen sky off`, `screen sky status`,
+  `screen sky <button>`, `screen sky power on|off`.
+
 ## HomeKit TV (Homebridge)
 
 `homebridge-pitv-tv/` is a local Homebridge platform plugin that publishes a
@@ -129,6 +153,7 @@ navigation, so the **Apple Home / Control Centre remote** drives the menu by
 feeding `input_queue`), and `JOKE_ON`/`JOKE_OFF` (see below). UDP is used
 because the official Homebridge service is sandboxed (`ProtectSystem=strict`)
 and can't write a `/tmp` FIFO, but it can always send a localhost packet.
+**Every datagram must be signed** (see *Authenticated commands* below).
 `tv_menu.py` owns the CEC bus and runs `cec-cmd.sh` itself with output
 suppressed (so it never scribbles on the menu).
 Power state is bidirectional: `listen_cec_remote` polls the TV's CEC power
@@ -146,6 +171,32 @@ reboot never comes back still pranking); the plugin polls it, and
 `deploy.sh` reinstalls the plugin into Homebridge (npm copies it at install
 time, so refreshing `/opt/pitv` alone isn't enough).
 (`tv-state.sh` was the older homebridge-cmd4 approach and is superseded.)
+
+## Authenticated commands
+
+Nothing drives the TV on trust any more:
+
+- **UDP control channel** — each datagram is
+  `PITV1 <ts> <nonce> <hmac-sha256> <payload>`, keyed on a secret shared with
+  Homebridge and the portals (`pitv_secrets.sign_command` /
+  `CommandVerifier`). Unsigned, stale (>120 s), replayed or wrongly-keyed
+  datagrams are counted and dropped, never logged verbatim. The socket is still
+  bound to `127.0.0.1` only.
+- **The key** lives in `/etc/pitv/control.key`, mode 0640, group `pitv`;
+  `deploy.sh` creates it and puts the PiTV user *and* the Homebridge user in
+  that group (the plugin also accepts `controlKey`/`controlKeyFile` in its
+  Homebridge config). `~/.pitv/control-key` is the fallback. `tv_menu` notices a
+  rotated key without a restart. `screen control status` shows the fingerprint,
+  who can read the file and whether Homebridge can; `screen control key
+  show|rotate` manages it.
+- **The FIFO** is 0660, not 0666 — it's a command channel into the menu (and,
+  during a game, into the game as keystrokes), so only the PiTV user and group
+  may write it.
+- **Portal allowlist** — `screen network allow <cidr>` restricts which client
+  addresses may reach the web portals at all; the connection is dropped in
+  `verify_request` before the login page is served, so a VPN range you haven't
+  allowed never even sees it. Empty (the default) means anyone who can route to
+  the Pi, as before. `screen network status` / `screen network clear`.
 
 ## Guest web portal
 

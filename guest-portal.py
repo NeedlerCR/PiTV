@@ -32,6 +32,7 @@ import base64
 import hashlib
 import hmac
 import html
+import ipaddress
 import json
 import os
 import secrets
@@ -60,6 +61,11 @@ GUEST_SECRET    = os.path.join(PITV_DIR, "portal-secret")
 ADMIN_SECRET    = os.path.join(PITV_DIR, "admin-secret")
 SECRET_FILE     = ADMIN_SECRET if ADMIN else GUEST_SECRET
 GUEST_MODE_FILE = "/tmp/pitv-guest-mode"
+SKY_FILE        = os.path.join(PITV_DIR, "sky.json")
+# Which client addresses may reach the portals at all (`screen network ...`).
+# Empty list = anyone who can route to the Pi, which is the historical
+# behaviour; add a CIDR to shut out, say, a VPN range.
+NETWORK_FILE    = os.path.join(PITV_DIR, "network.json")
 FIFO            = "/tmp/tv_menu.fifo"
 UDP_ADDR        = ("127.0.0.1", 8129)
 # Admin sessions effectively never expire; guest sessions last a week.
@@ -81,6 +87,27 @@ NAV = {"up": "UP", "down": "DOWN", "left": "LEFT", "right": "RIGHT",
 UDP = {"tv_on": "TV_ON", "tv_off": "TV_OFF",
        "input_sky": "CEC tx 1f:82:10:00", "input_pitv": "CEC tx 1f:82:20:00"}
 ADMIN_UDP = {"guest_on": "GUEST_ON", "guest_off": "GUEST_OFF"}
+
+# Sky Q buttons the portal may press. The payload is a fixed token, never
+# anything the browser supplies, and tv_menu ignores the lot unless Sky mode is
+# on (`screen sky on`).
+SKY_BUTTONS = [
+    ("sky_sky",     "SKY",     "Sky"),
+    ("sky_guide",   "GUIDE",   "TV Guide"),
+    ("sky_info",    "INFO",    "Info"),
+    ("sky_ch_up",   "CH_UP",   "CH +"),
+    ("sky_ch_down", "CH_DOWN", "CH −"),
+    ("sky_rewind",  "REWIND",  "&#9194;"),
+    ("sky_play",    "PLAY",    "&#9654;"),
+    ("sky_pause",   "PAUSE",   "&#10074;&#10074;"),
+    ("sky_forward", "FORWARD", "&#9193;"),
+    ("sky_record",  "RECORD",  "&#9679; Rec"),
+    ("sky_red",     "RED",     "Red"),
+    ("sky_green",   "GREEN",   "Green"),
+    ("sky_yellow",  "YELLOW",  "Yellow"),
+    ("sky_blue",    "BLUE",    "Blue"),
+]
+SKY_ACTIONS = {a: tok for a, tok, _ in SKY_BUTTONS}
 
 
 # ── storage helpers ──────────────────────────────────────────────────
@@ -317,12 +344,57 @@ def verify_session(cookie_val):
 
 # ── actuation ────────────────────────────────────────────────────────
 def send_udp(msg):
+    """Send a SIGNED command to tv_menu. Unsigned datagrams are dropped at the
+    far end, so a process without the shared key can't drive the TV even from
+    on the Pi itself."""
     try:
+        signed = pitv_secrets.sign_command(msg)
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.sendto(msg.encode(), UDP_ADDR)
+        s.sendto(signed.encode(), UDP_ADDR)
         s.close()
     except Exception:
         pass
+
+
+def sky_on():
+    """Is Sky control switched on? Only then does the portal show its panel."""
+    try:
+        with open(SKY_FILE) as f:
+            return bool(json.load(f).get("enabled"))
+    except Exception:
+        return False
+
+
+# ── network allowlist ────────────────────────────────────────────────
+_allow_cache = (0.0, [])
+
+
+def allowed_networks():
+    """Parsed allowlist, re-read at most once a minute so `screen network`
+    changes apply without restarting the portals."""
+    global _allow_cache
+    now = time.time()
+    if now - _allow_cache[0] < 60:
+        return _allow_cache[1]
+    nets = []
+    for entry in _load(NETWORK_FILE, {}).get("allow", []):
+        try:
+            nets.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            pass
+    _allow_cache = (now, nets)
+    return nets
+
+
+def address_allowed(ip):
+    nets = allowed_networks()
+    if not nets:
+        return True                       # no allowlist configured
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in n for n in nets)
 
 
 def write_fifo(token):
@@ -360,6 +432,8 @@ input{{font-size:17px;padding:12px;width:100%;border-radius:10px;border:1px soli
 background:#0b0f1a;color:#fff;margin:6px 0}}
 .row{{display:flex;gap:8px}}.row button{{margin:0}}
 .pad{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-width:260px;margin:0 auto}}
+.skygrid{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}}
+.skygrid button{{font-size:15px;padding:12px 4px;margin:0}}
 .pad button{{aspect-ratio:1;font-size:20px}}.pad .sp{{visibility:hidden}}
 .pin{{font-size:30px;letter-spacing:4px;font-weight:700;color:#7fd1ff}}
 .on{{background:#1f7a3f}}.off{{background:#7a2a2a}}
@@ -410,7 +484,18 @@ def controls_body(username):
         head = (f"<h1>PiTV Guest</h1><p class=muted>Signed in as {name}</p>"
                 f"<div class=card><p class=muted>Your game PIN</p>"
                 f'<div class=pin>{pin}</div></div>')
-    return head + """
+    sky = ""
+    if sky_on():
+        rows = "".join(
+            f'<button onclick="act(\'{a}\')">{label}</button>'
+            for a, _tok, label in SKY_BUTTONS)
+        sky = ('<div class=card><p class=muted>Sky Q</p>'
+               '<div class=skygrid>' + rows + '</div>'
+               '<div class=row style="margin-top:8px">'
+               '<button onclick="act(\'sky_power_on\')">Sky On</button>'
+               '<button onclick="act(\'sky_power_off\')">Sky Standby</button>'
+               '</div></div>')
+    return head + sky + """
 <div class=card><div class=row>
   <button onclick="act('tv_on')">TV On</button>
   <button onclick="act('tv_off')">TV Off</button></div>
@@ -577,6 +662,13 @@ class Handler(BaseHTTPRequestHandler):
                 write_fifo(NAV[action])
             elif action in UDP:
                 send_udp(UDP[action])
+            elif action in SKY_ACTIONS:
+                # Fixed token from our own table — the browser can't name an
+                # arbitrary CEC frame. tv_menu drops it unless Sky mode is on.
+                send_udp(f"SKY {SKY_ACTIONS[action]}")
+            elif action in ("sky_power_on", "sky_power_off"):
+                send_udp("SKY_POWER_ON" if action.endswith("_on")
+                         else "SKY_POWER_OFF")
             elif ADMIN and action == "guest_on":
                 set_guest_mode(True)
             elif ADMIN and action == "guest_off":
@@ -590,11 +682,29 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+class PiTVServer(ThreadingHTTPServer):
+    """Drops connections from outside the allowlist before a single byte of
+    request is parsed — the login page isn't even reachable from an address
+    that isn't allowed."""
+
+    def verify_request(self, request, client_address):
+        if address_allowed(client_address[0]):
+            return True
+        print(f"refused connection from {client_address[0]}", flush=True)
+        return False
+
+
 def main():
     if not ADMIN:
         maybe_rotate()
     get_secret()
-    httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    if not pitv_secrets.control_key():
+        print("WARNING: no control key readable — TV commands will be refused "
+              "by tv_menu. Run ./deploy.sh", flush=True)
+    nets = allowed_networks()
+    if nets:
+        print("Allowing only: " + ", ".join(str(n) for n in nets), flush=True)
+    httpd = PiTVServer(("0.0.0.0", PORT), Handler)
     print(f"PiTV {'admin' if ADMIN else 'guest'} portal on :{PORT}", flush=True)
     httpd.serve_forever()
 

@@ -55,6 +55,29 @@ System:
   screen emergency status               is the master code still the default?
   screen emergency set <6 digits>       set the master (emergency) code
 
+Sky Q (OFF by default — nothing is sent to the Sky box until you turn it on):
+  screen sky on [<la>] [always]         enable; optional CEC device number
+                                        (default 3) and 'always' to route keys
+                                        to Sky even when the input is unknown
+  screen sky off                        disable (the default)
+  screen sky status                     show the setting
+  screen sky <button>                   press one button, e.g.
+                                        guide info sky back up down left right
+                                        ok play pause stop record rewind
+                                        forward ch_up ch_down red green yellow
+                                        blue 0-9
+  screen sky power on|off               Sky Q's own standby
+
+Access control:
+  screen control status                 signed-command channel: key, who can
+                                        read it, whether Homebridge can
+  screen control key show               print the shared control key
+  screen control key rotate             new key (re-run deploy.sh after)
+  screen network status                 which client addresses may use the
+                                        web portals
+  screen network allow <cidr>           e.g. 192.168.1.0/24 — repeatable
+  screen network clear                  allow any address again (the default)
+
 Guest web portal (port 8080, only when Home 'Guest Mode' is on):
   screen guest password set <name> <pw> create/update a guest login
   screen guest list                     list guests + their NFC links
@@ -229,6 +252,48 @@ case "$CMD" in
     emergency)
         shift
         exec python3 /opt/pitv/pin-admin.py emergency "$@"
+        ;;
+
+    sky)
+        case "${2:-status}" in
+            on)
+                ARGS=""
+                [[ -n "${3:-}" ]] && ARGS=" ${3^^}"
+                [[ -n "${4:-}" ]] && ARGS="${ARGS} ${4^^}"
+                _send_raw "SKY_ON${ARGS}"
+                echo "Sky Q control ON.  (Sky needs HDMI-CEC enabled: Settings"
+                echo "-> Setup -> Preferences -> Control other devices.)"
+                ;;
+            off)
+                _send_raw "SKY_OFF"
+                echo "Sky Q control OFF."
+                ;;
+            status)
+                exec python3 /opt/pitv/pitv-config.py status
+                ;;
+            power)
+                case "${3:-}" in
+                    on)  _send_raw "SKY_POWER_ON";  echo "Sky Q: on" ;;
+                    off) _send_raw "SKY_POWER_OFF"; echo "Sky Q: standby" ;;
+                    *)   echo "Usage: screen sky power on|off" >&2; exit 1 ;;
+                esac
+                ;;
+            *)
+                _send_raw "SKY ${2^^}"
+                echo "Sky: ${2^^}   (nothing happens while 'screen sky status'"
+                echo "says OFF, or if the button name isn't one Sky knows)"
+                ;;
+        esac
+        ;;
+
+    control)
+        shift
+        exec python3 /opt/pitv/pitv-config.py control "$@"
+        ;;
+
+    network)
+        shift
+        exec python3 /opt/pitv/pitv-config.py network "$@"
         ;;
 
     unlock)

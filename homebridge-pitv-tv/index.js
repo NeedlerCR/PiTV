@@ -15,14 +15,22 @@
 // (127.0.0.1:8129). The official Homebridge service is sandboxed
 // (ProtectSystem=strict) so it can't write a /tmp FIFO, but it can always send
 // a localhost packet. tv_menu.py owns the CEC bus and runs the commands.
+//
+// Every datagram is SIGNED: "PITV1 <ts> <nonce> <hmac-sha256> <payload>",
+// keyed on a secret shared with tv_menu.py. deploy.sh writes it to
+// /etc/pitv/control.key and puts the Homebridge user in the 'pitv' group so
+// this plugin can read it; `controlKey`/`controlKeyFile` in the platform
+// config override that. Without the key tv_menu drops everything we send, and
+// the log below says so.
 //   TV_ON | TV_OFF        -> power
 //   CEC <tx frame>        -> input switching
 //   KEY <TOKEN>           -> menu navigation
 //   KILL_ON | KILL_OFF    -> kill switch
 //   JOKE_ON | JOKE_OFF    -> joke mode
 
-const dgram = require('dgram');
-const fs    = require('fs');
+const crypto = require('crypto');
+const dgram  = require('dgram');
+const fs     = require('fs');
 
 const PLUGIN_NAME   = 'homebridge-pitv-tv';
 const PLATFORM_NAME = 'PiTVTelevision';
@@ -37,6 +45,9 @@ const TV_INPUT_FILE = '/tmp/pitv-tv-input';
 // tv_menu.py writes joke mode's real state here (it clears it on boot, and
 // `screen joke on|off` flips it too), so the Home switch stays honest.
 const JOKE_STATE_FILE = '/tmp/pitv-joke-mode';
+// Shared secret for the signed control channel (see pitv_secrets.py).
+const CONTROL_KEY_FILES = ['/etc/pitv/control.key'];
+const CONTROL_PREFIX    = 'PITV1';
 
 // Broadcast "Active Source = <physical address>" so the TV switches input.
 // Initiator "1" = the Pi's CEC logical address (libcec registers as Recorder 1
@@ -75,6 +86,7 @@ class PiTVTelevisionPlatform {
     this.killOn      = false;
     this.guestOn     = false;
     this.jokeOn      = false;
+    this.controlKey  = this.loadControlKey();
 
     this.api.on('didFinishLaunching', () => {
       this.publishTelevision();
@@ -89,10 +101,49 @@ class PiTVTelevisionPlatform {
     this.accessories.push(accessory);
   }
 
-  // Fire-and-forget a UDP datagram to tv_menu.py.
+  // Read the shared control key: explicit config first, then the file
+  // deploy.sh sets up. Returns '' if we can't get one — every send then fails
+  // loudly rather than firing commands tv_menu will silently drop.
+  loadControlKey() {
+    if (this.config.controlKey) return String(this.config.controlKey).trim();
+    const paths = this.config.controlKeyFile
+      ? [this.config.controlKeyFile, ...CONTROL_KEY_FILES]
+      : CONTROL_KEY_FILES;
+    for (const p of paths) {
+      try {
+        const k = fs.readFileSync(p, 'utf8').trim();
+        if (k) {
+          this.log.info(`Control key loaded from ${p}.`);
+          return k;
+        }
+      } catch (e) { /* try the next one */ }
+    }
+    this.log.error(
+      'No control key: tv_menu.py will reject every command from this plugin. '
+      + 'Run ./deploy.sh on the Pi (it writes /etc/pitv/control.key and adds '
+      + 'the Homebridge user to the "pitv" group), then restart Homebridge. '
+      + 'Check it with: screen control status');
+    return '';
+  }
+
+  // Sign a payload the way pitv_secrets.CommandVerifier expects. The nonce
+  // makes each datagram single-use, so one captured off the wire is dead.
+  sign(payload) {
+    const ts    = Math.floor(Date.now() / 1000);
+    const nonce = crypto.randomBytes(8).toString('hex');
+    const sig   = crypto.createHmac('sha256', this.controlKey)
+      .update(`${ts}|${nonce}|${payload}`).digest('hex');
+    return `${CONTROL_PREFIX} ${ts} ${nonce} ${sig} ${payload}`;
+  }
+
+  // Fire-and-forget a signed UDP datagram to tv_menu.py.
   send(str) {
+    if (!this.controlKey) {
+      this.log.error(`Not sending "${str}": no control key (see the note above).`);
+      return;
+    }
     const client = dgram.createSocket('udp4');
-    client.send(Buffer.from(str), CEC_UDP_PORT, CEC_UDP_HOST, (err) => {
+    client.send(Buffer.from(this.sign(str)), CEC_UDP_PORT, CEC_UDP_HOST, (err) => {
       if (err) this.log.error(`UDP send "${str}" failed: ${err.message}`);
       else     this.log.info(`-> ${str}`);
       client.close();

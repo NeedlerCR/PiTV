@@ -24,7 +24,7 @@ except ImportError:
     EVDEV_OK = False
 
 # ChronosVer: vYYYY.MAJOR.MINOR.BUG
-VERSION = "v2026.2.5.0"
+VERSION = "v2026.3.0.0"
 
 # ─────────────────────────────────────────────────────────────────────
 # LOG SYSTEM
@@ -505,7 +505,11 @@ def listen_fifo():
         except Exception: pass
     try:
         os.mkfifo(FIFO_PATH)
-        os.chmod(FIFO_PATH, 0o666)
+        # 0660, not 0666: the FIFO is a command channel into the menu (and into
+        # a running game, as keystrokes). Only the PiTV user and its group —
+        # the `screen` CLI, remote.py and the two portals, which all run as
+        # that user — have any business writing it.
+        os.chmod(FIFO_PATH, 0o660)
     except Exception:
         pass
 
@@ -538,6 +542,25 @@ def listen_fifo():
                         _set_joke_mode(cmd == "JOKE_ON")
                         continue
 
+                    # Sky Q. SKY_ON/SKY_OFF flip the master switch (off by
+                    # default); "SKY <TOKEN>" is one button press, and does
+                    # nothing at all while the switch is off.
+                    if cmd.startswith("SKY_ON"):
+                        parts = cmd.split()
+                        la  = parts[1] if len(parts) > 1 and parts[1].isdigit() else None
+                        alw = "ALWAYS" in parts
+                        _set_sky_mode(True, logical=la, always=alw)
+                        continue
+                    if cmd == "SKY_OFF":
+                        _set_sky_mode(False)
+                        continue
+                    if cmd in ("SKY_POWER_ON", "SKY_POWER_OFF"):
+                        sky_power(cmd.endswith("_ON"))
+                        continue
+                    if cmd.startswith("SKY "):
+                        sky_key(cmd[4:].strip())
+                        continue
+
                     # `screen unlock authorise <code>` clears a hard lockdown.
                     if cmd.startswith("UNLOCK "):
                         code = raw.split(" ", 1)[1].strip() if " " in raw else ""
@@ -563,16 +586,16 @@ def listen_fifo():
                     # HOME/CLEAR are always menu-level (HOME quits a game). Other
                     # keys drive a running external game via uinput injection, and
                     # otherwise feed the menu / built-in games through input_queue.
-                    if cmd in ("HOME", "CLEAR"):
+                    if cmd == "CLEAR":
                         input_queue.append(cmd)
+                    elif cmd in ("HOME", "UP", "DOWN", "LEFT", "RIGHT",
+                                 "SELECT", "BACK", "PLAY", "ENTER", "SPEED"):
+                        # Same routing as the Apple remote: a running game, the
+                        # Sky box if that's what's on screen, else the menu.
+                        route_remote_key(cmd)
                     elif (controller_mode == "GAME_EXTERNAL" and cmd in
-                          ("UP","DOWN","LEFT","RIGHT","SELECT","BACK","PLAY",
-                           "ENTER","SPACE","TAB","ESC","BKSP","SPEED")):
-                        _remote_inject("SELECT" if cmd == "ENTER" else cmd)
-                    elif cmd in ("UP","DOWN","LEFT","RIGHT","SELECT","BACK"):
-                        input_queue.append(cmd)
-                    elif cmd == "ENTER":
-                        input_queue.append("SELECT")
+                          ("SPACE", "TAB", "ESC", "BKSP")):
+                        _remote_inject(cmd)
                     elif cmd.startswith("RUN "):
                         parts   = raw.split(" ", 3)
                         art_key = parts[1].upper() if len(parts) > 1 else ""
@@ -675,6 +698,156 @@ def listen_cec_remote():
 CEC_UDP_PORT = 8129
 # Whitelisted raw CEC frame, e.g. "tx 4f:82:10:00" (used for input switching).
 _CEC_TX_RE = re.compile(r"^tx([ ][0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2})*)+$")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# SKY Q REMOTE  (off by default — `screen sky on`)
+# ─────────────────────────────────────────────────────────────────────
+#
+# The Sky Q box sits on the same HDMI-CEC bus as everything else, so the Pi can
+# drive it by sending User Control frames (opcode 0x44 pressed, 0x45 released)
+# to the box's logical address. That means the Apple Home / Control Centre
+# remote AND the web portal's D-pad can drive Sky, with no extra hardware.
+#
+# Sky needs "Control other devices"/HDMI-CEC enabled in its own settings
+# (Settings -> Setup -> Preferences) for any of this to land.
+#
+# OFF by default: nothing is sent to the Sky box until `screen sky on`.
+SKY_STATE_FILE  = os.path.expanduser("~/.pitv/sky.json")
+SKY_SRC_LA      = 1        # the Pi — libcec registers as Recorder 1
+SKY_DEFAULT_LA  = 3        # Sky Q as Tuner 1; `screen sky on <la>` overrides
+SKY_INPUT_PHYS  = "10:00"  # Sky on HDMI 1 (matches the `screen change` map)
+
+# CEC User Control codes (CEC 1.4, "UI command"). Only these are ever sent —
+# a token that isn't in this table is dropped rather than passed through.
+SKY_KEYS = {
+    "UP": 0x01, "DOWN": 0x02, "LEFT": 0x03, "RIGHT": 0x04,
+    "SELECT": 0x00, "OK": 0x00, "ENTER": 0x2B,
+    "BACK": 0x0D,                      # Sky's "back up"
+    "SKY": 0x09,                       # root menu = the Sky button
+    "GUIDE": 0x53,                     # TV Guide
+    "INFO": 0x35, "SPEED": 0x35,       # SPEED = the Apple remote's "i" button
+    "TEXT": 0x0B,
+    "PLAY": 0x44, "PAUSE": 0x46, "STOP": 0x45, "RECORD": 0x47,
+    "REWIND": 0x48, "FORWARD": 0x49,
+    "CH_UP": 0x30, "CH_DOWN": 0x31, "CH_PREV": 0x32,
+    "RED": 0x72, "GREEN": 0x73, "YELLOW": 0x74, "BLUE": 0x71,
+    **{str(d): 0x20 + d for d in range(10)},          # 0-9
+}
+
+
+def _load_sky() -> dict:
+    """Read fresh every time so `screen sky on` applies without a restart."""
+    try:
+        with open(SKY_STATE_FILE) as f:
+            d = json.load(f)
+        if isinstance(d, dict):
+            return d
+    except Exception:
+        pass
+    return {}
+
+
+def _save_sky(d: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(SKY_STATE_FILE), exist_ok=True)
+        with open(SKY_STATE_FILE, "w") as f:
+            json.dump(d, f)
+    except OSError:
+        pass
+
+
+def _sky_enabled() -> bool:
+    return bool(_load_sky().get("enabled"))
+
+
+def _sky_routes_keys() -> bool:
+    """Should a plain nav key (Apple remote, portal D-pad) drive Sky instead of
+    the PiTV menu right now?
+
+    Only when Sky mode is on AND the TV is actually showing the Sky input, so
+    the one remote drives whatever is on screen and the menu never becomes
+    undrivable. `screen sky on always` pins it to Sky for a box whose input
+    never reports over CEC."""
+    d = _load_sky()
+    if not d.get("enabled"):
+        return False
+    return bool(d.get("always")) or tv_input_phys == SKY_INPUT_PHYS
+
+
+def _set_sky_mode(on: bool, logical=None, always=None) -> dict:
+    d = _load_sky()
+    d["enabled"] = bool(on)
+    if logical is not None:
+        d["logical"] = int(logical)
+    if always is not None:
+        d["always"] = bool(always)
+    d.setdefault("logical", SKY_DEFAULT_LA)
+    d.setdefault("always", False)
+    _save_sky(d)
+    log(f"Sky Q control {'ON' if on else 'OFF'} "
+        f"(device {d['logical']}, always={d['always']})")
+    return d
+
+
+def sky_key(token: str) -> bool:
+    """Send one Sky button press. Returns False if Sky mode is off or the token
+    isn't one we know — nothing is ever sent to the bus in that case."""
+    d = _load_sky()
+    if not d.get("enabled"):
+        return False
+    code = SKY_KEYS.get(token.upper())
+    if code is None:
+        return False
+    la = int(d.get("logical", SKY_DEFAULT_LA)) & 0xF
+    hdr = f"{SKY_SRC_LA:X}{la:X}"
+    # Press and release in ONE cec-client run: cec-cmd.sh pipes the string in,
+    # so a newline gives us both frames without paying the bus-handover cost
+    # twice (which would make the remote feel half as responsive).
+    _run_cec_cmd(f"tx {hdr}:44:{code:02X}\ntx {hdr}:45")
+    log(f"Sky: {token.upper()} -> {hdr}:44:{code:02X}")
+    return True
+
+
+# Tokens the remote / portal / CLI may put into the menu queue.
+REMOTE_MENU_NAV = {"UP", "DOWN", "LEFT", "RIGHT", "SELECT", "BACK", "SPEED"}
+
+
+def route_remote_key(tok: str) -> None:
+    """One place that decides where a remote or portal nav key goes.
+
+    Order matters: a running game wins (it's on the PiTV input and its keys are
+    injected for real), then Sky if Sky is what's on screen, then the menu.
+    HOME is always the way back to PiTV — if Sky was driving, it also flips the
+    TV to the Pi's input, so you're never left pressing keys at a menu you
+    can't see."""
+    tok = tok.upper()
+    if tok == "HOME":
+        if _sky_routes_keys():
+            _run_cec_cmd("tx 1f:82:20:00")     # back to PiTV (HDMI 2)
+        input_queue.append("HOME")
+        return
+    if controller_mode == "GAME_EXTERNAL":
+        # ENTER behaves as SELECT here (Enter AND Space), so a remote's Enter
+        # still starts games whose prompt is "press SPACE to play".
+        _remote_inject("SELECT" if tok == "ENTER" else tok)
+        return
+    if _sky_routes_keys() and sky_key(tok):
+        return
+    q = "SPEED" if tok == "PLAY" else "SELECT" if tok == "ENTER" else tok
+    if q in REMOTE_MENU_NAV:
+        input_queue.append(q)
+
+
+def sky_power(on: bool) -> bool:
+    """Sky Q's own standby, separate from the TV's."""
+    d = _load_sky()
+    if not d.get("enabled"):
+        return False
+    la = int(d.get("logical", SKY_DEFAULT_LA)) & 0xF
+    _run_cec_cmd(f"{'on' if on else 'standby'} {la}")
+    log(f"Sky: power {'on' if on else 'standby'} (device {la})")
+    return True
 
 
 def _run_cec_cmd(cmd_str):
@@ -979,23 +1152,39 @@ def _inject_char(ch):
         _press_keys([mapped[0]], shift=mapped[1])
 
 
+_udp_reject_count = 0
+_udp_reject_logged = 0.0
+
+
 def listen_cec_udp():
-    """Control channel from homebridge-pitv-tv over localhost UDP.
+    """Authenticated control channel from homebridge-pitv-tv over localhost UDP.
+
+    EVERY datagram must be signed: "PITV1 <ts> <nonce> <hmac> <payload>", keyed
+    on the shared control key (see pitv_secrets.py). Unsigned, stale, replayed
+    or wrongly-keyed datagrams are counted and dropped. Before this, anything
+    that could reach the socket could switch the TV on, arm the kill switch or
+    open the guest portal.
 
     Homebridge is sandboxed and can't write our /tmp FIFO, but it can always
-    send a localhost datagram. Accepted messages:
+    send a localhost datagram. Accepted payloads:
       TV_ON / TV_OFF     -> CEC power on / standby (this process owns the bus)
       KILL_ON / KILL_OFF -> kill switch (keep the TV forced off)
       JOKE_ON / JOKE_OFF -> joke mode (TV "dies" after a random 10-50 min)
       CEC tx <frame>     -> raw CEC frame, e.g. input switching (whitelisted)
-      KEY <TOKEN>        -> Apple Home / Control Centre remote. In the menu and
-                            built-in games it feeds input_queue; during an
-                            external game it's injected as a real keystroke via
-                            uinput. Tokens: UP/DOWN/LEFT/RIGHT/SELECT/PLAY/BACK/
-                            HOME/SPEED.
+      KEY <TOKEN>        -> Apple Home / Control Centre remote. Routed by
+                            route_remote_key(): a running game, the Sky box, or
+                            the PiTV menu. Tokens: UP/DOWN/LEFT/RIGHT/SELECT/
+                            PLAY/BACK/HOME/SPEED.
+      SKY <TOKEN>        -> explicit Sky Q button (portal Sky panel); ignored
+                            unless `screen sky on`.
+      SKY_POWER_ON/OFF   -> Sky Q's own standby
     """
     import socket
-    MENU_NAV = {"UP", "DOWN", "LEFT", "RIGHT", "SELECT", "BACK", "SPEED"}
+    global _udp_reject_count, _udp_reject_logged
+    verifier = pitv_secrets.CommandVerifier()
+    if not verifier.key:
+        log("CONTROL KEY MISSING — UDP control channel will reject everything. "
+            "Run ./deploy.sh (or: screen control status)")
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1006,9 +1195,22 @@ def listen_cec_udp():
     log(f"Control UDP listener ready on 127.0.0.1:{CEC_UDP_PORT}")
     while True:
         try:
-            data, _ = sock.recvfrom(128)
-            msg = data.decode("utf-8", "ignore").strip()
-            up  = msg.upper()
+            data, _ = sock.recvfrom(512)
+            if verifier.maybe_reload():
+                log("Control key changed — reloaded "
+                    f"(fingerprint {pitv_secrets.key_fingerprint(verifier.key)})")
+            raw = data.decode("utf-8", "ignore").strip()
+            msg, why = verifier.verify(raw)
+            if why:
+                # Never log the datagram itself — it could be someone else's
+                # valid command being replayed at us. Count and summarise.
+                _udp_reject_count += 1
+                if time.time() - _udp_reject_logged > 30:
+                    _udp_reject_logged = time.time()
+                    log(f"Control UDP: rejected ({why}); "
+                        f"{_udp_reject_count} refused so far")
+                continue
+            up = msg.upper()
             if up in ("TV_ON", "TV_OFF"):
                 log(f"HomeKit CEC: {up}")
                 _set_tv_power("on" if up == "TV_ON" else "off")
@@ -1026,21 +1228,12 @@ def listen_cec_udp():
                         f.write(state)
                 except OSError:
                     pass
+            elif up in ("SKY_POWER_ON", "SKY_POWER_OFF"):
+                sky_power(up.endswith("_ON"))
+            elif up.startswith("SKY "):
+                sky_key(up[4:].strip())                   # no-op while Sky is off
             elif up.startswith("KEY "):
-                tok = up[4:].strip()
-                if tok == "HOME":
-                    input_queue.append("HOME")            # quit game / to menu
-                elif controller_mode == "GAME_EXTERNAL":
-                    _remote_inject(tok)                   # real keys into the game
-                else:
-                    if tok == "PLAY":
-                        q = "SPEED"          # play/pause speeds up Snake
-                    elif tok == "ENTER":
-                        q = "SELECT"
-                    else:
-                        q = tok
-                    if q in MENU_NAV:
-                        input_queue.append(q)             # menu + built-in games
+                route_remote_key(up[4:].strip())
             elif msg.startswith("CEC "):
                 frame = msg[4:].strip()
                 if _CEC_TX_RE.match(frame):
